@@ -1,15 +1,11 @@
-import json
-import logging
-import subprocess
-from pathlib import Path
+import os
+import requests
 
-logger = logging.getLogger(__name__)
+GLM_API_KEY = os.getenv("GLM_API_KEY")
+# Z.ai endpoint (OpenAI-совместимый)
+GLM_URL = "https://api.z.ai/api/paas/v4/chat/completions"
 
-MODEL = "zai-coding-plan/glm-5-turbo"
-SUMMARIES_DIR = Path(__file__).parent / "summaries"
-MAX_PREV_SUMMARIES = 5
-
-SYSTEM_PROMPT = """\
+WARHAMMER_SYSTEM = """\
 Ты — архивариус Ордос Милитант, хронист Империума Человечества. Ты ведёшь летопись \
 сектора по перехваченным vox-сообщениям.
 
@@ -21,9 +17,12 @@ SYSTEM_PROMPT = """\
 действия нескольких персонажей — они взаимодействуют, спорят, соглашаются.
 - Каждый абзац — мини-сцена, развёрнутая мысль или описание атмосферы. \
 4-8 абзацев на всю хронику.
+- Саммаризируй переписку как главу из Книги Памяти: пафосно, мрачно, с упоминанием ересей и доблести.
+- Используй термины: Империум, Хаос, еретик, служение, тьма, братья и сёстры.
+- Будь краток, но эпичен.
 
 ЗАГОЛОВОК:
-«Хроника Ереси Хоруса, Фрагмент N. Чат Сектора «<название чата>»»
+«Хроника Ереси, Фрагмент N. Лог Сектора «МВК»»
 (номер фрагмента — прибавляй 1 к номеру из последней предыдущей хроники, \
 или начни с 1 если хроник ещё нет)
 
@@ -40,6 +39,7 @@ SYSTEM_PROMPT = """\
 - Парадоксы и чёрный юмор в духе WH40K: \
 «все кричали о X, но никто не заметил Y»
 - Тон — торжественный и мрачный, но с иронией.
+- Можно использовать мат, где он уместен или где он был в сообщениях.
 
 ПРИМЕР стиля (не копируй, имитируй подход):
 «Верный Легионер Дима, не остыв от вчерашнего предательства, обнажил клинок \
@@ -48,92 +48,39 @@ SYSTEM_PROMPT = """\
 но голоса разумных потонули в шуме.»
 
 СТРОГО:
-- Сохраняй ВСЕ факты: кто что сказал, какие темы обсуждались.
 - Не выдумывай события, которых не было в сообщениях.
 - Пиши на русском языке.
 - Если есть предыдущие хроники — развивай сюжетные линии.
 - Никаких списков, буллитов, заголовков по ролям, статус-блоков или таблиц.
 """
 
-OPENCODE_BIN = "/Users/a-starch/.opencode/bin/opencode"
 
-
-def _load_previous_summaries() -> str:
-    if not SUMMARIES_DIR.exists():
-        return ""
-    files = sorted(SUMMARIES_DIR.glob("*.md"))
-    recent = files[-MAX_PREV_SUMMARIES:]
-    if not recent:
-        return ""
-    parts: list[str] = []
-    for f in recent:
-        parts.append(f"### {f.stem}\n{f.read_text(encoding='utf-8').strip()}")
-    return "\n\n---\n\n".join(parts)
-
-
-def summarize(messages: list[str]) -> str:
-    if not messages:
-        return "Нет сообщений для саммаризации."
-
-    transcript = "\n".join(messages)
-    prev = _load_previous_summaries()
+def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
+    # Формируем контекст из предыдущих саммаризаций
     context = ""
-    if prev:
-        context = (
-            f"## Предыдущие хроники (для сохранения континуитета):\n\n{prev}\n\n---\n\n"
-        )
-    user_prompt = (
-        f"{context}"
-        f"## Новые перехваченные vox-сообщения за последние 24 часа:\n\n"
-        f"{transcript}\n\n"
-        "Составь сводку за текущий день. Если в предыдущих хрониках упоминались "
-        "развивающиеся сюжеты или открытые вопросы — учти их, укажи развитие событий. "
-        "Если это первая сводка — просто составь начальный доклад."
+    if prev_summaries:
+        context = "Предыдущие летописи:\n"
+        for day, s in reversed(prev_summaries):
+            context += f"[{day}]: {s}\n\n"
+
+    # Формируем текущий диалог
+    dialog = "\n".join(f"{user}: {text}" for user, text in messages)
+
+    user_prompt = f"{context}Сегодняшняя переписка:\n{dialog}\n\nСоздай летопись дня."
+
+    response = requests.post(
+        GLM_URL,
+        headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "glm-5-turbo",
+            "messages": [
+                {"role": "system", "content": WARHAMMER_SYSTEM},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.8
+        },
+        timeout=60
     )
-
-    cmd = [
-        OPENCODE_BIN,
-        "run",
-        "-m",
-        MODEL,
-        "--format",
-        "json",
-        user_prompt,
-    ]
-
-    logger.info("Calling opencode with %d messages...", len(messages))
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd="/Users/a-starch/work/project/tg_w40k",
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("opencode timed out after 300s")
-        return "Ошибка: таймаут саммаризации."
-
-    if result.returncode != 0:
-        logger.error(
-            "opencode failed (rc=%d): %s", result.returncode, result.stderr[:500]
-        )
-        return f"Ошибка opencode: {result.stderr[:200]}"
-
-    output = result.stdout.strip()
-
-    try:
-        events = [json.loads(line) for line in output.splitlines() if line.strip()]
-        for event in reversed(events):
-            if event.get("type") != "text":
-                continue
-            part = event.get("part", {})
-            text = part.get("text", "")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-    except json.JSONDecodeError:
-        pass
-
-    logger.warning("Failed to parse JSON output, using raw stdout")
-    return output if output else "Не удалось получить саммаризацию."
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
