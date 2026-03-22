@@ -2,7 +2,7 @@ import asyncio
 import os
 import logging
 from datetime import date, timedelta
-from aiogram import Bot, Dispatcher
+from aiogram import F, Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -19,15 +19,6 @@ TARGET_CHAT_ID = int(os.getenv("CHAT_ID")) # chat_id группы
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
-
-@dp.message()
-async def collect_message(message: Message):
-    logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
-    if message.chat.id != TARGET_CHAT_ID:
-        return
-    if message.text:
-        username = message.from_user.username or message.from_user.full_name
-        await save_message(message.chat.id, username, message.text)
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: Message):
@@ -56,6 +47,15 @@ async def cmd_send_to_chat(message: Message):
         day, text = summaries[0]
         await bot.send_message(TARGET_CHAT_ID, f"📜 *Летопись {day}*\n\n{text}", parse_mode="Markdown")
         await message.answer("Отправлено в чат.")
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def collect_message(message: Message):
+    logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
+    if message.chat.id != TARGET_CHAT_ID:
+        return
+    if message.text:
+        username = message.from_user.username or message.from_user.full_name
+        await save_message(message.chat.id, username, message.text)
 
 async def daily_summarize():
     """Запускается по расписанию — саммаризирует вчерашний день"""
