@@ -66,6 +66,8 @@ async def collect_message(message: Message):
     if not message.text:
         return
 
+    text_lower = message.text.lower()
+
     if any(bad in text_lower for bad in BAD_SUBSTRINGS):
         logging.info("Skip spam message: %s", message.text)
         return
