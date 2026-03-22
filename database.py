@@ -66,3 +66,33 @@ async def delete_old_messages(chat_id, day: str):
             (chat_id, day)
         )
         await db.commit()
+
+async def get_filtered_messages_for_date(chat_id, day: str):
+    """
+    Возвращает только сообщения от юзеров,
+    которые за день написали >1 сообщения И эти сообщения не все одинаковые.
+    """
+    query = """
+    WITH user_stats AS (
+        SELECT
+            username,
+            COUNT(*) AS cnt,
+            COUNT(DISTINCT text) AS distinct_cnt
+        FROM messages
+        WHERE chat_id = ? AND date = ?
+        GROUP BY username
+    ),
+    good_users AS (
+        SELECT username
+        FROM user_stats
+        WHERE cnt > 1 AND distinct_cnt > 1
+    )
+    SELECT m.username, m.text
+    FROM messages m
+    JOIN good_users g ON g.username = m.username
+    WHERE m.chat_id = ? AND m.date = ?
+    ORDER BY m.ts;
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(query, (chat_id, day, chat_id, day)) as cursor:
+            return await cursor.fetchall()
