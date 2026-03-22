@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO)
 
 @dp.message()
 async def collect_message(message: Message):
+    logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
     if message.chat.id != TARGET_CHAT_ID:
         return
     if message.text:
