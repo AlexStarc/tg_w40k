@@ -32,8 +32,12 @@ async def collect_message(message: Message):
 @dp.message(Command("summary"))
 async def cmd_summary(message: Message):
     """Команда для тебя — показывает вчерашнюю саммаризацию"""
+    logging.info(f"SUMMARY command from user_id={message.from_user.id}, ADMIN_ID={ADMIN_ID}")
     if message.from_user.id != ADMIN_ID:
+        logging.warning("Rejected: not admin")
         return
+
+    logging.info(f"SUMMARY command from user_id={message.from_user.id}, is admin!")
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
     if summaries:
