@@ -72,6 +72,8 @@ async def collect_message(message: Message):
         return
     if not message.text:
         return
+    if message.from_user.is_bot:
+        return
 
     text_lower = message.text.lower()
 
