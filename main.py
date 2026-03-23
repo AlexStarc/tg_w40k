@@ -58,6 +58,13 @@ async def cmd_send_to_chat(message: Message):
         await bot.send_message(TARGET_CHAT_ID, f"📜 *Летопись {day}*\n\n{text}", parse_mode="Markdown")
         await message.answer("Отправлено в чат.")
 
+@dp.message(Command("run_summary"))
+async def cmd_run_summary(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await daily_summarize()
+    await message.answer("Готово")
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
     logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
