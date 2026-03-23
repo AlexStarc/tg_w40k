@@ -3,7 +3,7 @@ import requests
 
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 # Z.ai endpoint (OpenAI-совместимый)
-GLM_URL = "https://api.z.ai/api/paas/v4/chat/completions"
+GLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 
 WARHAMMER_SYSTEM = """\
 Ты — архивариус Ордос Милитант, хронист Империума Человечества. Ты ведёшь летопись \
