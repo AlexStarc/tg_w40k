@@ -101,7 +101,7 @@ async def collect_message(message: Message):
         logging.info("Skip spam message: %s", message.text)
         return
 
-    username = message.from_user.username or message.from_user.full_name
+    username =  message.from_user.full_name or message.from_user.username
     await save_message(message.chat.id, username, message.text)
 
 async def daily_summarize():
