@@ -26,37 +26,48 @@ TARGET_CHAT_ID = int(os.getenv("CHAT_ID")) # chat_id группы
 
 BAD_SUBSTRINGS = ["подработка", "легкая подработка", "лёгкая подработка", "работа"]
 
+# Разбиваем на части по 4096 символов
+CHUNK_SIZE = 4096
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: Message):
-    """Команда для тебя — показывает вчерашнюю саммаризацию"""
     logging.info(f"SUMMARY command from user_id={message.from_user.id}, ADMIN_ID={ADMIN_ID}")
     if message.from_user.id != ADMIN_ID:
         logging.warning("Rejected: not admin")
         return
 
-    logging.info(f"SUMMARY command from user_id={message.from_user.id}, is admin!")
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
     summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
-    if summaries:
-        day, text = summaries[0]
-        await message.answer(f"📜 Летопись {day}:\n\n{text}")
-    else:
+    if not summaries:
         await message.answer("Летописей не найдено.")
+        return
+
+    day, text = summaries[0]
+    full_text = f"📜 Летопись {day}:\n\n{text}"
+
+    for i in range(0, len(full_text), CHUNK_SIZE):
+        await message.answer(full_text[i:i + CHUNK_SIZE])
 
 @dp.message(Command("send_to_chat"))
 async def cmd_send_to_chat(message: Message):
-    """Команда для тебя — отправляет последнюю саммаризацию в чат"""
     if message.from_user.id != ADMIN_ID:
         return
+
     summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
-    if summaries:
-        day, text = summaries[0]
-        await bot.send_message(TARGET_CHAT_ID, f"📜 *Летопись {day}*\n\n{text}", parse_mode="Markdown")
-        await message.answer("Отправлено в чат.")
+    if not summaries:
+        await message.answer("Летописей не найдено.")
+        return
+
+    day, text = summaries[0]
+    full_text = f"📜 *Летопись {day}*\n\n{text}"
+
+    for i in range(0, len(full_text), CHUNK_SIZE):
+        await bot.send_message(TARGET_CHAT_ID, full_text[i:i + CHUNK_SIZE], parse_mode="Markdown")
+
+    await message.answer("Отправлено в чат.")
 
 @dp.message(Command("run_summary"))
 async def cmd_run_summary(message: Message):
