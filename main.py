@@ -76,6 +76,15 @@ async def cmd_run_summary(message: Message):
     await daily_summarize()
     await message.answer("Готово")
 
+@dp.message(Command("cleanup"))
+async def cmd_cleanup(message: Message):
+    """Удаляет сырые сообщения за вчера после того как саммари проверен"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    await delete_old_messages(TARGET_CHAT_ID, yesterday)
+    await message.answer(f"🗑 Сообщения за {yesterday} удалены.")
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
     logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
@@ -98,7 +107,6 @@ async def collect_message(message: Message):
 async def daily_summarize():
     yesterday = (date.today() - timedelta(days=1)).isoformat()
 
-    # Берём уже ОТФИЛЬТРОВАННЫЕ сообщения
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
     if not messages:
         logging.info(f"Нет подходящих сообщений за {yesterday} (всё — одиночки/боты/спам)")
@@ -107,11 +115,15 @@ async def daily_summarize():
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
     summary = summarize(messages, prev_summaries)
     await save_summary(TARGET_CHAT_ID, yesterday, summary)
-    await delete_old_messages(TARGET_CHAT_ID, yesterday)
     logging.info(f"Саммаризация за {yesterday} сохранена.")
+
+    # Уведомляем — удалять пока НЕ удаляем
     await bot.send_message(
         ADMIN_ID,
-        f"✅ Летопись за {yesterday} готова. /summary чтобы посмотреть, /send_to_chat чтобы отправить."
+        f"✅ Летопись за {yesterday} готова.\n"
+        f"/summary — посмотреть\n"
+        f"/send_to_chat — отправить в чат\n"
+        f"/cleanup — удалить сырые сообщения за {yesterday}"
     )
 
 async def main():
