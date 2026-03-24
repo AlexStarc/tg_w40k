@@ -79,7 +79,7 @@ def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
                 {"role": "system", "content": WARHAMMER_SYSTEM},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 1000,
+            "max_tokens": 20000,
             "temperature": 0.8
         },
         timeout=60
