@@ -17,7 +17,7 @@ from database import (
     get_last_summaries,
     delete_old_messages,
 )
-from summarizer import summarize
+from summarizer import summarize, edit_summary
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -114,6 +114,7 @@ async def daily_summarize():
 
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
     summary = summarize(messages, prev_summaries)
+    summary = edit_summary(summary)
     await save_summary(TARGET_CHAT_ID, yesterday, summary)
     logging.info(f"Саммаризация за {yesterday} сохранена.")
 
@@ -129,7 +130,13 @@ async def daily_summarize():
 async def main():
     await init_db()
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(daily_summarize, "cron", hour=0, minute=5)  # каждую ночь в 00:05
+    scheduler.add_job(
+        daily_summarize,
+        "cron",
+        hour=0,
+        minute=5,
+        misfire_grace_time=3600
+    )
     scheduler.start()
     await dp.start_polling(bot)
 

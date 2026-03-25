@@ -1,5 +1,6 @@
 import os
 import requests
+import logging
 
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 # Z.ai endpoint (OpenAI-совместимый)
@@ -55,6 +56,40 @@ WARHAMMER_SYSTEM = """\
 - Перепроверь, что нет английских слов в тексте!
 - Размер должен влезать в одно сообщение в телеграмме.
 """
+
+EDITOR_SYSTEM = """\
+Ты — редактор летописей Империума. Тебе дают готовую хронику на русском языке.
+
+ТВОИ ЗАДАЧИ:
+1. Замени все английские слова и фразы русскими эквивалентами или транслитерацией.
+2. Имена участников — переведи или адаптируй в духе Вархаммера 40000:
+   - Английские/латинские имена → русские аналоги или WH40K-имена (например: John → Иоанн, Mike → Михаил, Alex → Алексий)
+   - Ники типа «zakenayo», «teena_k» → придумай подходящий WH40K-титул+имя (Техножрец Закенайо, Адептка Тина и т.д.)
+   - Русские имена оставь как есть
+3. НЕ меняй структуру, сюжет, цитаты и смысл текста.
+4. НЕ добавляй новые события или персонажей.
+5. Верни только исправленный текст, без комментариев.
+"""
+
+def edit_summary(summary: str) -> str:
+    response = requests.post(
+        GLM_URL,
+        headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "glm-5-turbo",
+            "messages": [
+                {"role": "system", "content": EDITOR_SYSTEM},
+                {"role": "user", "content": summary}
+            ],
+            "max_tokens": 20000,
+            "temperature": 0.3  # низкая температура — редактура, не творчество
+        },
+        timeout=60
+    )
+    if not response.ok:
+        logging.error("GLM editor error %s: %s", response.status_code, response.text)
+        return summary  # если ошибка — вернуть оригинал
+    return response.json()["choices"][0]["message"]["content"]
 
 
 def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
