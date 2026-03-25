@@ -65,7 +65,7 @@ async def cmd_send_to_chat(message: Message):
     full_text = f"📜 *Летопись {day}*\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
-        await bot.send_message(TARGET_CHAT_ID, full_text[i:i + CHUNK_SIZE], parse_mode="Markdown")
+        await bot.send_message(TARGET_CHAT_ID, full_text[i:i + CHUNK_SIZE])
 
     await message.answer("Отправлено в чат.")
 
