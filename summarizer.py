@@ -76,7 +76,7 @@ def edit_summary(summary: str) -> str:
         GLM_URL,
         headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "glm-5-turbo",
+            "model": "glm-5.1",
             "messages": [
                 {"role": "system", "content": EDITOR_SYSTEM},
                 {"role": "user", "content": summary}
@@ -109,7 +109,7 @@ def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
         GLM_URL,
         headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "glm-5-turbo",
+            "model": "glm-5.1",
             "messages": [
                 {"role": "system", "content": WARHAMMER_SYSTEM},
                 {"role": "user", "content": user_prompt}
