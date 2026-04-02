@@ -73,6 +73,7 @@ async def cmd_send_to_chat(message: Message):
 async def cmd_run_summary(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
+    logging.info("cmd_run_summary STARTED")
     await daily_summarize()
     await message.answer("Готово")
 
@@ -105,6 +106,7 @@ async def collect_message(message: Message):
     await save_message(message.chat.id, username, message.text)
 
 async def daily_summarize():
+    logging.info("daily_summarize STARTED")
     yesterday = (date.today() - timedelta(days=1)).isoformat()
 
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
@@ -126,6 +128,7 @@ async def daily_summarize():
         f"/send_to_chat — отправить в чат\n"
         f"/cleanup — удалить сырые сообщения за {yesterday}"
     )
+    logging.info("daily_summarize FINISHED")
 
 async def main():
     await init_db()
