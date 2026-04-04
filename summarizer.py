@@ -73,54 +73,61 @@ EDITOR_SYSTEM = """\
 """
 
 MODEL_RESPONSE_TIMEOUT = 120
+FALLBACK_MODEL = "glm-5-turbo"
+PRIMARY_MODEL = "glm-5.1"
+
+def _call_glm(payload: dict, timeout: int = MODEL_RESPONSE_TIMEOUT) -> dict:
+    """Вызов GLM с фоллбеком на glm-5-turbo при таймауте."""
+    headers = {"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(GLM_URL, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        logging.info("GLM response OK, model=%s", payload.get("model"))
+        return response.json()
+    except requests.exceptions.Timeout:
+        logging.warning("GLM timeout on model=%s, falling back to %s", payload.get("model"), FALLBACK_MODEL)
+        payload = {**payload, "model": FALLBACK_MODEL}
+        response = requests.post(GLM_URL, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        logging.info("Fallback GLM response OK, model=%s", FALLBACK_MODEL)
+        return response.json()
 
 def edit_summary(summary: str) -> str:
-    response = requests.post(
-        GLM_URL,
-        headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": "glm-5.1",
-            "messages": [
-                {"role": "system", "content": EDITOR_SYSTEM},
-                {"role": "user", "content": summary}
-            ],
-            "max_tokens": 20000,
-            "temperature": 0.3  # низкая температура — редактура, не творчество
-        },
-        timeout=MODEL_RESPONSE_TIMEOUT,
-    )
-    if not response.ok:
-        logging.error("GLM editor error %s: %s", response.status_code, response.text)
-        return summary  # если ошибка — вернуть оригинал
-    return response.json()["choices"][0]["message"]["content"]
-
+    payload = {
+        "model": PRIMARY_MODEL,
+        "messages": [
+            {"role": "system", "content": EDITOR_SYSTEM},
+            {"role": "user", "content": summary}
+        ],
+        "max_tokens": 20000,
+        "temperature": 0.3
+    }
+    try:
+        result = _call_glm(payload)
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logging.error("GLM editor failed: %s", e)
+        return summary  # если всё плохо — вернуть оригинал
 
 def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
-    # Формируем контекст из предыдущих саммаризаций
     context = ""
     if prev_summaries:
         context = "Предыдущие летописи:\n"
         for day, s in reversed(prev_summaries):
             context += f"[{day}]: {s}\n\n"
 
-    # Формируем текущий диалог
     dialog = "\n".join(f"{user}: {text}" for user, text in messages)
-
     user_prompt = f"{context}Сегодняшняя переписка:\n{dialog}\n\nСоздай летопись дня."
 
-    response = requests.post(
-        GLM_URL,
-        headers={"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": "glm-5.1",
-            "messages": [
-                {"role": "system", "content": WARHAMMER_SYSTEM},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 20000,
-            "temperature": 0.8
-        },
-        timeout=MODEL_RESPONSE_TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    payload = {
+        "model": PRIMARY_MODEL,
+        "messages": [
+            {"role": "system", "content": WARHAMMER_SYSTEM},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": 20000,
+        "temperature": 0.8
+    }
+    result = _call_glm(payload)
+    return result["choices"][0]["message"]["content"]
