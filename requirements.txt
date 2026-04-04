@@ -3,4 +3,3 @@ aiosqlite
 apscheduler
 python-dotenv
 requests
-pytz

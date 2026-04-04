@@ -2,7 +2,7 @@ import asyncio
 import os
 import logging
 from datetime import date, timedelta, datetime
-import pytz
+from zoneinfo import ZoneInfo
 from aiogram import F, Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -84,7 +84,7 @@ async def cmd_cleanup(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    msk = pytz.timezone("Europe/Moscow")
+    msk = ZoneInfo("Europe/Moscow")
     yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
 
     await delete_old_messages(TARGET_CHAT_ID, yesterday)
@@ -111,7 +111,8 @@ async def collect_message(message: Message):
 
 async def daily_summarize():
     logging.info("daily_summarize STARTED")
-    msk = pytz.timezone("Europe/Moscow")
+
+    msk = ZoneInfo("Europe/Moscow")
     yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
 
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
