@@ -55,6 +55,8 @@ WARHAMMER_SYSTEM = """\
 - Если есть предыдущие хроники — развивай сюжетные линии.
 - Никаких списков, буллитов, заголовков по ролям, статус-блоков или таблиц.
 - Перепроверь, что нет английских слов в тексте!
+- СТРОГО до 3500 символов. Лучше меньше — максимум 4-5 абзацев. Краткость = доблесть.
+- Планируй объём заранее: 4-5 абзацев по 3-4 предложения. Лучше сократить детали, чем превысить лимит.
 - Размер должен влезать в одно сообщение в телеграмме.
 """
 
@@ -75,6 +77,7 @@ EDITOR_SYSTEM = """\
 MODEL_RESPONSE_TIMEOUT = 120
 FALLBACK_MODEL = "glm-5-turbo"
 PRIMARY_MODEL = "glm-5.1"
+MAX_TOKENS = 15000
 
 def _call_glm(payload: dict, timeout: int = MODEL_RESPONSE_TIMEOUT) -> dict:
     """Вызов GLM с фоллбеком на glm-5-turbo при таймауте."""
@@ -100,7 +103,7 @@ def edit_summary(summary: str) -> str:
             {"role": "system", "content": EDITOR_SYSTEM},
             {"role": "user", "content": summary}
         ],
-        "max_tokens": 20000,
+        "max_tokens": MAX_TOKENS,
         "temperature": 0.3
     }
     try:
@@ -126,7 +129,7 @@ def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
             {"role": "system", "content": WARHAMMER_SYSTEM},
             {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": 20000,
+        "max_tokens": MAX_TOKENS,
         "temperature": 0.8
     }
     result = _call_glm(payload)
