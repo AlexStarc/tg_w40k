@@ -72,6 +72,8 @@ EDITOR_SYSTEM = """\
 5. Верни только исправленный текст, без комментариев.
 """
 
+MODEL_RESPONSE_TIMEOUT = 120
+
 def edit_summary(summary: str) -> str:
     response = requests.post(
         GLM_URL,
@@ -85,7 +87,7 @@ def edit_summary(summary: str) -> str:
             "max_tokens": 20000,
             "temperature": 0.3  # низкая температура — редактура, не творчество
         },
-        timeout=60
+        timeout=MODEL_RESPONSE_TIMEOUT,
     )
     if not response.ok:
         logging.error("GLM editor error %s: %s", response.status_code, response.text)
@@ -118,7 +120,7 @@ def summarize(messages: list[tuple], prev_summaries: list[tuple]) -> str:
             "max_tokens": 20000,
             "temperature": 0.8
         },
-        timeout=60
+        timeout=MODEL_RESPONSE_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]

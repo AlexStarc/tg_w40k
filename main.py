@@ -1,7 +1,8 @@
 import asyncio
 import os
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+import pytz
 from aiogram import F, Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -82,7 +83,10 @@ async def cmd_cleanup(message: Message):
     """Удаляет сырые сообщения за вчера после того как саммари проверен"""
     if message.from_user.id != ADMIN_ID:
         return
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+
+    msk = pytz.timezone("Europe/Moscow")
+    yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
+
     await delete_old_messages(TARGET_CHAT_ID, yesterday)
     await message.answer(f"🗑 Сообщения за {yesterday} удалены.")
 
@@ -107,7 +111,8 @@ async def collect_message(message: Message):
 
 async def daily_summarize():
     logging.info("daily_summarize STARTED")
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    msk = pytz.timezone("Europe/Moscow")
+    yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
 
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
     if not messages:
