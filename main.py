@@ -1,44 +1,48 @@
 import asyncio
-import os
 import logging
-from datetime import date, timedelta, datetime
+import os
+import signal
+from datetime import timedelta, datetime
 from zoneinfo import ZoneInfo
+
 from aiogram import F, Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 
+from config import ADMIN_ID, TARGET_CHAT_ID, BAD_SUBSTRINGS, CHUNK_SIZE
 from database import (
     init_db,
+    migrate_db,
     save_message,
-    get_messages_for_date,
     get_filtered_messages_for_date,
     save_summary,
     get_last_summaries,
     delete_old_messages,
+    get_all_characters,
+    get_character,
+    upsert_character,
+    save_rating,
+    get_avg_rating,
+    get_setting,
+    set_setting,
+    delete_setting,
 )
-from summarizer import summarize, edit_summary
+from summarizer import summarize, generate_character_titles
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))      # твой Telegram user_id
-TARGET_CHAT_ID = int(os.getenv("CHAT_ID")) # chat_id группы
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-BAD_SUBSTRINGS = ["подработка", "легкая подработка", "лёгкая подработка", "работа"]
-
-# Разбиваем на части по 4096 символов
-CHUNK_SIZE = 4096
-
-bot = Bot(token=BOT_TOKEN)
+bot: Bot = None  # type: ignore[assignment]
 dp = Dispatcher()
-logging.basicConfig(level=logging.INFO)
+
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: Message):
-    logging.info(f"SUMMARY command from user_id={message.from_user.id}, ADMIN_ID={ADMIN_ID}")
     if message.from_user.id != ADMIN_ID:
-        logging.warning("Rejected: not admin")
         return
 
     summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
@@ -50,7 +54,8 @@ async def cmd_summary(message: Message):
     full_text = f"📜 Летопись {day}:\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
-        await message.answer(full_text[i:i + CHUNK_SIZE])
+        await message.answer(full_text[i : i + CHUNK_SIZE])
+
 
 @dp.message(Command("send_to_chat"))
 async def cmd_send_to_chat(message: Message):
@@ -66,21 +71,26 @@ async def cmd_send_to_chat(message: Message):
     full_text = f"📜 *Летопись {day}*\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
-        await bot.send_message(TARGET_CHAT_ID, full_text[i:i + CHUNK_SIZE])
+        await bot.send_message(TARGET_CHAT_ID, full_text[i : i + CHUNK_SIZE])
 
     await message.answer("Отправлено в чат.")
+
 
 @dp.message(Command("run_summary"))
 async def cmd_run_summary(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    logging.info("cmd_run_summary STARTED")
-    await daily_summarize()
-    await message.answer("Готово")
+    await message.answer("Начинаю генерацию...")
+    try:
+        await daily_summarize()
+        await message.answer("Готово")
+    except Exception as e:
+        logger.exception("run_summary failed")
+        await message.answer(f"Ошибка: {e}")
+
 
 @dp.message(Command("cleanup"))
 async def cmd_cleanup(message: Message):
-    """Удаляет сырые сообщения за вчера после того как саммари проверен"""
     if message.from_user.id != ADMIN_ID:
         return
 
@@ -90,9 +100,125 @@ async def cmd_cleanup(message: Message):
     await delete_old_messages(TARGET_CHAT_ID, yesterday)
     await message.answer(f"🗑 Сообщения за {yesterday} удалены.")
 
+
+@dp.message(Command("rate"))
+async def cmd_rate(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) != 2 or parts[1] not in {"1", "2", "3", "4", "5"}:
+        await message.answer("Использование: /rate <1-5>")
+        return
+
+    summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
+    if not summaries:
+        await message.answer("Летописей не найдено.")
+        return
+
+    day, _ = summaries[0]
+    rating = int(parts[1])
+    await save_rating(day, rating)
+
+    avg = await get_avg_rating()
+    avg_text = f" (средняя оценка: {avg:.1f})" if avg else ""
+    await message.answer(f"Оценка {rating} за {day} сохранена.{avg_text}")
+
+
+@dp.message(Command("regenerate"))
+async def cmd_regenerate(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.strip().split()
+    msk = ZoneInfo("Europe/Moscow")
+
+    if len(parts) >= 2:
+        target_date = parts[1]
+    else:
+        target_date = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
+
+    await message.answer(f"Перегенерация за {target_date}...")
+    try:
+        await daily_summarize(target_date=target_date)
+        await message.answer(f"Летопись за {target_date} перегенерирована.")
+    except Exception as e:
+        logger.exception("regenerate failed")
+        await message.answer(f"Ошибка: {e}")
+
+
+@dp.message(Command("characters"))
+async def cmd_characters(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    chars = await get_all_characters()
+    if not chars:
+        await message.answer("Справочник персонажей пуст.")
+        return
+
+    lines = ["📜 Справочник персонажей:\n"]
+    for name, title in chars:
+        lines.append(f"• {name} = {title}")
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("character"))
+async def cmd_character_set(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.strip().split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Использование: /character <username> <WH40K титул>")
+        return
+
+    username = parts[1]
+    title = parts[2]
+    await upsert_character(username, title)
+    await message.answer(f"✅ {username} = {title}")
+
+
+@dp.message(Command("set_prompt"))
+async def cmd_set_prompt(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        current = await get_setting("writer_prompt")
+        if current:
+            await message.answer(f"Текущий кастомный промпт:\n\n{current[:1000]}...")
+        else:
+            await message.answer("Используется дефолтный промпт.")
+        return
+
+    new_prompt = parts[1]
+    if new_prompt.lower() in ("reset", "сброс", "default"):
+        await delete_setting("writer_prompt")
+        await message.answer("Промпт сброшен к дефолтному.")
+    else:
+        await set_setting("writer_prompt", new_prompt)
+        await message.answer(f"✅ Промпт обновлён ({len(new_prompt)} символов).")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    avg = await get_avg_rating()
+    chars = await get_all_characters()
+    avg_text = f"{avg:.1f}" if avg else "нет оценок"
+    await message.answer(
+        f"📊 Статистика:\n"
+        f"• Персонажей в справочнике: {len(chars)}\n"
+        f"• Средняя оценка летописей: {avg_text}"
+    )
+
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
-    logging.info(f"Message from chat_id={message.chat.id} type={message.chat.type}")
     if message.chat.id != TARGET_CHAT_ID:
         return
     if not message.text:
@@ -101,53 +227,120 @@ async def collect_message(message: Message):
         return
 
     text_lower = message.text.lower()
-
     if any(bad in text_lower for bad in BAD_SUBSTRINGS):
-        logging.info("Skip spam message: %s", message.text)
+        logger.info("Skip spam message: %s", message.text)
         return
 
-    username =  message.from_user.full_name or message.from_user.username
-    await save_message(message.chat.id, username, message.text)
+    username = message.from_user.full_name or message.from_user.username
 
-async def daily_summarize():
-    logging.info("daily_summarize STARTED")
+    reply_to_text = None
+    if message.reply_to_message and message.reply_to_message.text:
+        reply_to_text = message.reply_to_message.text
+
+    await save_message(
+        message.chat.id,
+        username,
+        message.text,
+        message_id=message.message_id,
+        reply_to_text=reply_to_text,
+    )
+
+
+async def daily_summarize(target_date: str = None):
+    logger.info("daily_summarize STARTED")
 
     msk = ZoneInfo("Europe/Moscow")
-    yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
+    if target_date:
+        yesterday = target_date
+    else:
+        yesterday = (datetime.now(msk).date() - timedelta(days=1)).isoformat()
 
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
     if not messages:
-        logging.info(f"Нет подходящих сообщений за {yesterday} (всё — одиночки/боты/спам)")
+        logger.info("Нет подходящих сообщений за %s", yesterday)
         return
 
+    characters = await get_all_characters()
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
-    summary = summarize(messages, prev_summaries)
-    summary = edit_summary(summary)
-    await save_summary(TARGET_CHAT_ID, yesterday, summary)
-    logging.info(f"Саммаризация за {yesterday} сохранена.")
 
-    # Уведомляем — удалять пока НЕ удаляем
+    missing_names = set()
+    existing_names = {name for name, _ in characters}
+    for _, username, _, _ in messages:
+        if username not in existing_names:
+            missing_names.add(username)
+
+    if missing_names:
+        new_titles = await generate_character_titles(messages, characters)
+        for name, title in new_titles:
+            await upsert_character(name, title)
+            logger.info("New character: %s = %s", name, title)
+        characters = await get_all_characters()
+
+    custom_prompt = await get_setting("writer_prompt")
+
+    summary, new_chars = await summarize(
+        messages, prev_summaries, characters, custom_writer_prompt=custom_prompt
+    )
+
+    for name, title in new_chars:
+        existing = await get_character(name)
+        if not existing:
+            await upsert_character(name, title)
+            logger.info("Auto-assigned character: %s = %s", name, title)
+
+    await save_summary(TARGET_CHAT_ID, yesterday, summary)
+    logger.info("Саммаризация за %s сохранена (%d символов).", yesterday, len(summary))
+
     await bot.send_message(
         ADMIN_ID,
         f"✅ Летопись за {yesterday} готова.\n"
         f"/summary — посмотреть\n"
         f"/send_to_chat — отправить в чат\n"
-        f"/cleanup — удалить сырые сообщения за {yesterday}"
+        f"/rate <1-5> — оценить\n"
+        f"/cleanup — удалить сырые сообщения",
     )
-    logging.info("daily_summarize FINISHED")
+    logger.info("daily_summarize FINISHED")
+
 
 async def main():
     await init_db()
+    await migrate_db()
+    logger.info("DB initialized and migrated")
+
+    bot_token = os.getenv("BOT_TOKEN")
+    global bot
+    bot = Bot(token=bot_token)
+
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
         daily_summarize,
         "cron",
         hour=0,
         minute=5,
-        misfire_grace_time=3600
+        misfire_grace_time=3600,
     )
     scheduler.start()
-    await dp.start_polling(bot)
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_shutdown(scheduler)))
+
+    logger.info("Bot starting...")
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        scheduler.shutdown(wait=False)
+        await bot.session.close()
+        logger.info("Bot stopped.")
+
+
+async def _shutdown(scheduler):
+    logger.info("Shutdown signal received")
+    scheduler.shutdown(wait=False)
+    await dp.stop_polling()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
