@@ -19,6 +19,7 @@ from database import (
     save_summary,
     get_last_summaries,
     delete_old_messages,
+    cleanup_old_data,
     get_all_characters,
     get_character,
     upsert_character,
@@ -99,6 +100,20 @@ async def cmd_cleanup(message: Message):
 
     await delete_old_messages(TARGET_CHAT_ID, yesterday)
     await message.answer(f"🗑 Сообщения за {yesterday} удалены.")
+
+
+@dp.message(Command("purge"))
+async def cmd_purge(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    msg_count, sum_count, rat_count = await cleanup_old_data(TARGET_CHAT_ID, days=14)
+    await message.answer(
+        f"🧹 Удалено старше 14 дней:\n"
+        f"• Сообщений: {msg_count}\n"
+        f"• Летописей: {sum_count}\n"
+        f"• Оценок: {rat_count}"
+    )
 
 
 @dp.message(Command("rate"))
@@ -246,6 +261,15 @@ async def collect_message(message: Message):
     )
 
 
+async def auto_cleanup():
+    logger.info("auto_cleanup STARTED")
+    msg_count, sum_count, rat_count = await cleanup_old_data(TARGET_CHAT_ID, days=14)
+    logger.info(
+        "auto_cleanup: deleted %d messages, %d summaries, %d ratings older than 14 days",
+        msg_count, sum_count, rat_count,
+    )
+
+
 async def daily_summarize(target_date: str = None):
     logger.info("daily_summarize STARTED")
 
@@ -263,17 +287,19 @@ async def daily_summarize(target_date: str = None):
     characters = await get_all_characters()
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
 
-    missing_names = set()
     existing_names = {name for name, _ in characters}
+    unknown_names = {name for name, title in characters if title == "Неизвестный"}
+    missing_names = set()
     for _, username, _, _ in messages:
         if username not in existing_names:
             missing_names.add(username)
 
-    if missing_names:
+    need_regenerate = missing_names | unknown_names
+    if need_regenerate:
         new_titles = await generate_character_titles(messages, characters)
         for name, title in new_titles:
             await upsert_character(name, title)
-            logger.info("New character: %s = %s", name, title)
+            logger.info("Character title: %s = %s", name, title)
         characters = await get_all_characters()
 
     custom_prompt = await get_setting("writer_prompt")
@@ -284,7 +310,7 @@ async def daily_summarize(target_date: str = None):
 
     for name, title in new_chars:
         existing = await get_character(name)
-        if not existing:
+        if not existing or existing == "Неизвестный":
             await upsert_character(name, title)
             logger.info("Auto-assigned character: %s = %s", name, title)
 
@@ -317,6 +343,13 @@ async def main():
         "cron",
         hour=0,
         minute=5,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        auto_cleanup,
+        "cron",
+        hour=3,
+        minute=0,
         misfire_grace_time=3600,
     )
     scheduler.start()

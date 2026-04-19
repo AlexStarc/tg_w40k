@@ -146,6 +146,28 @@ async def delete_old_messages(chat_id, day: str):
         await db.commit()
 
 
+async def cleanup_old_data(chat_id, days: int = 14):
+    cutoff = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM messages WHERE chat_id=? AND date<?",
+            (chat_id, cutoff),
+        )
+        msg_count = cur.rowcount
+        cur = await db.execute(
+            "DELETE FROM summaries WHERE chat_id=? AND date<?",
+            (chat_id, cutoff),
+        )
+        sum_count = cur.rowcount
+        cur = await db.execute(
+            "DELETE FROM ratings WHERE date<?",
+            (cutoff,),
+        )
+        rat_count = cur.rowcount
+        await db.commit()
+    return msg_count, sum_count, rat_count
+
+
 async def get_all_characters():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

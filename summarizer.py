@@ -1,10 +1,42 @@
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+_MSK = ZoneInfo("Europe/Moscow")
+
+_ROMAN_MAP = {
+    "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7,
+    "VIII": 8, "IX": 9, "X": 10, "XI": 11, "XII": 12, "XIII": 13,
+    "XIV": 14, "XV": 15, "XVI": 16, "XVII": 17, "XVIII": 18, "XIX": 19,
+    "XX": 20, "XXI": 21, "XXII": 22, "XXIII": 23, "XXIV": 24, "XXV": 25,
+    "XXVI": 26, "XXVII": 27, "XXVIII": 28, "XXIX": 29, "XXX": 30,
+    "XL": 40, "XLI": 41, "XLII": 42, "XLIII": 43, "XLIV": 44, "XLV": 45,
+    "XLVI": 46, "XLVII": 47, "XLVIII": 48, "XLIX": 49, "L": 50,
+    "LI": 51, "LII": 52, "LIII": 53, "LIV": 54, "LV": 55, "LVI": 56,
+    "LVII": 57, "LVIII": 58, "LIX": 59, "LX": 60, "LXX": 70, "LXXX": 80,
+    "XC": 90, "C": 100,
+}
+
+
+def _parse_last_fragment(prev_summaries: list[tuple]) -> int:
+    if not prev_summaries:
+        return 0
+    for _, text in prev_summaries:
+        match = re.search(r"Фрагмент\s+([IVXLCDM]+)", text, re.IGNORECASE)
+        if match:
+            roman = match.group(1).upper()
+            if roman in _ROMAN_MAP:
+                return _ROMAN_MAP[roman]
+        match = re.search(r"Фрагмент\s+(\d+)", text)
+        if match:
+            return int(match.group(1))
+    return 0
 
 from config import (
     GLM_API_KEY,
@@ -64,7 +96,7 @@ def _ts_to_hhmm(ts: Optional[int]) -> str:
     if not ts:
         return "??:??"
     try:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(_MSK)
         return dt.strftime("%H:%M")
     except (OSError, ValueError):
         return "??:??"
@@ -103,7 +135,7 @@ def preprocess_messages(messages: list[tuple]) -> str:
         hour = 0
         if ts:
             try:
-                hour = datetime.fromtimestamp(ts, tz=timezone.utc).hour
+                hour = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(_MSK).hour
             except (OSError, ValueError):
                 pass
 
@@ -314,25 +346,33 @@ async def _map_reduce_analyze(
 
 
 async def generate_character_titles(
-    messages: list[tuple], existing_registry: list[tuple]
+    messages: list[tuple], existing_registry: list[tuple], regenerate_unknown: bool = True
 ) -> list[tuple[str, str]]:
-    """Генерирует WH40K-титулы для новых участников."""
-    existing_names = {name for name, _ in existing_registry}
-    new_names = set()
+    """Генерирует WH40K-титулы для участников без титула."""
+    existing_map = {name: title for name, title in existing_registry}
+    target_names = set()
     for _, username, _, _ in messages:
-        if username not in existing_names:
-            new_names.add(username)
+        if username not in existing_map:
+            target_names.add(username)
+        elif regenerate_unknown and existing_map[username] == "Неизвестный":
+            target_names.add(username)
 
-    if not new_names:
+    if not target_names:
         return []
 
-    names_str = ", ".join(new_names)
+    names_str = "; ".join(sorted(target_names))
     prompt = (
         "Назначь каждому участнику WH40K-титул. Верни JSON-массив: "
-        f'[{{"username": "ник", "title": "WH40K-титул"}}]\nУчастники: {names_str}\n\n'
-        "Титулы: Легионер, Капеллан, Адептка, Техножрец, Инквизитор, "
+        f'[{{"username": "ник", "title": "WH40K-титул"}}]\n\n'
+        f"Участники (каждый с новой строки, используй ПОЛНОЕ имя включая запятые):\n"
+    )
+    for name in sorted(target_names):
+        prompt += f"- {name}\n"
+    prompt += (
+        "\nТитулы: Легионер, Капеллан, Адептка, Техножрец, Инквизитор, "
         "Лорд-Командир, Сёстра-Армингер, Псайкер, Арбитр, Миссионер, "
-        "Ассасин, Исповедник, Санеус, Хронист, Навигатор, Комиссар и т.д."
+        "Ассасин, Исповедник, Сангвинарный Жрец, Хронист, Навигатор, Комиссар и т.д.\n"
+        "ВАЖНО: username в ответе должен точно совпадать с исходным, включая запятые и спецсимволы."
     )
     payload = {
         "model": PRIMARY_MODEL,
@@ -356,7 +396,7 @@ async def generate_character_titles(
         return [(item["username"], item["title"]) for item in parsed if "username" in item and "title" in item]
     except Exception as e:
         logger.error("Character title generation failed: %s", e)
-        return [(name, "Неизвестный") for name in new_names]
+        return []
 
 
 async def summarize(
@@ -376,11 +416,15 @@ async def summarize(
     formatted = preprocess_messages(messages)
     character_registry_str = format_character_registry(characters)
 
+    next_fragment = _parse_last_fragment(prev_summaries) + 1
+
     prev_summaries_text = ""
     if prev_summaries:
         prev_summaries_text = "ПРЕДЫДУЩИЕ ЛЕТОПИСИ:\n"
         for day, s in reversed(prev_summaries):
             prev_summaries_text += f"[{day}]: {s}\n\n"
+
+    prev_summaries_text += f"\nСЛЕДУЮЩИЙ НОМЕР ФРАГМЕНТА: {next_fragment}\n"
 
     new_char_titles: list[tuple[str, str]] = []
     need_map_reduce = _estimate_tokens(formatted) > TOKEN_LIMIT_INPUT

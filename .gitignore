@@ -20,3 +20,4 @@ venv/
 # Collected message data
 data/
 bot.db
+bot_server.db
