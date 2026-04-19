@@ -155,11 +155,14 @@ async def cmd_regenerate(message: Message):
 
     await message.answer(f"Перегенерация за {target_date}...")
     try:
-        await daily_summarize(target_date=target_date)
-        await message.answer(f"Летопись за {target_date} перегенерирована.")
+        ok = await daily_summarize(target_date=target_date)
+        if ok:
+            await message.answer(f"✅ Летопись за {target_date} перегенерирована.")
+        else:
+            await message.answer(f"⚠ Нет сообщений за {target_date} — летопись не создана.")
     except Exception as e:
         logger.exception("regenerate failed")
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("characters"))
@@ -270,7 +273,7 @@ async def auto_cleanup():
     )
 
 
-async def daily_summarize(target_date: str = None):
+async def daily_summarize(target_date: str = None) -> bool:
     logger.info("daily_summarize STARTED")
 
     msk = ZoneInfo("Europe/Moscow")
@@ -282,7 +285,7 @@ async def daily_summarize(target_date: str = None):
     messages = await get_filtered_messages_for_date(TARGET_CHAT_ID, yesterday)
     if not messages:
         logger.info("Нет подходящих сообщений за %s", yesterday)
-        return
+        return False
 
     characters = await get_all_characters()
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
@@ -326,6 +329,7 @@ async def daily_summarize(target_date: str = None):
         f"/cleanup — удалить сырые сообщения",
     )
     logger.info("daily_summarize FINISHED")
+    return True
 
 
 async def main():
