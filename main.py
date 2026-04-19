@@ -69,7 +69,7 @@ async def cmd_send_to_chat(message: Message):
         return
 
     day, text = summaries[0]
-    full_text = f"📜 *Летопись {day}*\n\n{text}"
+    full_text = f"📜 Летопись {day}:\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
         await bot.send_message(TARGET_CHAT_ID, full_text[i : i + CHUNK_SIZE])
