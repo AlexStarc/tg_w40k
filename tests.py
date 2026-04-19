@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from database import init_db, migrate_db, save_summary, get_last_summaries, DB_PATH
-from summarizer import preprocess_messages, _estimate_tokens, format_character_registry, _parse_last_fragment
+from summarizer import preprocess_messages, _estimate_tokens, format_character_registry, _parse_last_fragment, _fix_fragment_number
 
 
 class TestDateLogic:
@@ -111,6 +111,30 @@ class TestFragmentParsing:
             ("2026-04-17", "Фрагмент L"),
         ]
         assert _parse_last_fragment(prev) == 52
+
+
+class TestFixFragmentNumber:
+    def test_fix_wrong_arabic(self):
+        text = "«Хроника Ереси, Фрагмент 2. Лог Сектора «МВК»»\nSome text"
+        result = _fix_fragment_number(text, 53)
+        assert "Фрагмент 53" in result
+        assert "Фрагмент 2" not in result
+
+    def test_fix_wrong_roman(self):
+        text = "«Хроника Ереси, Фрагмент I. Лог Сектора «МВК»»\nSome text"
+        result = _fix_fragment_number(text, 53)
+        assert "Фрагмент 53" in result
+
+    def test_no_change_when_correct(self):
+        text = "«Хроника Ереси, Фрагмент 53. Лог Сектора «МВК»»\nSome text"
+        result = _fix_fragment_number(text, 53)
+        assert result == text
+
+    def test_fix_preserves_rest(self):
+        text = "«Хроника Ереси, Фрагмент 1. Лог Сектора «МВК»»\nParagraph one.\nParagraph two."
+        result = _fix_fragment_number(text, 53)
+        assert "Paragraph one." in result
+        assert "Paragraph two." in result
 
 
 class TestTokenEstimation:

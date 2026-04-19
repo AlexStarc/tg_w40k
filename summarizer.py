@@ -399,6 +399,11 @@ async def generate_character_titles(
         return []
 
 
+def _fix_fragment_number(summary: str, expected: int) -> str:
+    pattern = r"(Хроника Ереси,\s*Фрагмент\s+)[IVXLCDM\d]+"
+    return re.sub(pattern, rf"\g<1>{expected}", summary, count=1)
+
+
 async def summarize(
     messages: list[tuple],
     prev_summaries: list[tuple],
@@ -470,7 +475,9 @@ async def summarize(
         result = await _call_glm(payload)
         summary = result["choices"][0]["message"]["content"]
 
+    summary = _fix_fragment_number(summary, next_fragment)
     summary = await _run_editor(summary, character_registry_str)
+    summary = _fix_fragment_number(summary, next_fragment)
     return summary, new_char_titles
 
 
