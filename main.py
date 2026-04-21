@@ -54,6 +54,10 @@ async def cmd_summary(message: Message):
         return
 
     day, text = summaries[0]
+    logger.info(
+        "/summary: date=%s chat_id=%s fragment_line=%s len=%d",
+        day, TARGET_CHAT_ID, text.split("\n")[0][:80], len(text),
+    )
     full_text = f"📜 Летопись {day}:\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
