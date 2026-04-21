@@ -54,9 +54,10 @@ async def cmd_summary(message: Message):
         return
 
     day, text = summaries[0]
-    logger.info(
-        "/summary: date=%s chat_id=%s fragment_line=%s len=%d",
-        day, TARGET_CHAT_ID, text.split("\n")[0][:80], len(text),
+    first_line = text.split("\n")[0][:80]
+    logger.warning(
+        "/summary HIT: db_path=%s target_chat_id=%s date=%s first_line=%s len=%d",
+        database_mod.DB_PATH, TARGET_CHAT_ID, day, first_line, len(text),
     )
     full_text = f"📜 Летопись {day}:\n\n{text}"
 
@@ -352,7 +353,11 @@ async def daily_summarize(target_date: str = None) -> bool:
             logger.info("Auto-assigned character: %s = %s", name, title)
 
     await save_summary(TARGET_CHAT_ID, yesterday, summary)
-    logger.info("Саммаризация за %s сохранена (%d символов).", yesterday, len(summary))
+    first_line = summary.split("\n")[0][:80]
+    logger.warning(
+        "SAVED summary: date=%s db_path=%s first_line=%s len=%d",
+        yesterday, database_mod.DB_PATH, first_line, len(summary),
+    )
 
     await bot.send_message(
         ADMIN_ID,
