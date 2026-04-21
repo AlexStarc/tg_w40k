@@ -59,7 +59,8 @@ async def cmd_summary(message: Message):
         "/summary HIT: db_path=%s target_chat_id=%s date=%s first_line=%s len=%d",
         database_mod.DB_PATH, TARGET_CHAT_ID, day, first_line, len(text),
     )
-    full_text = f"📜 Летопись {day}:\n\n{text}"
+    now = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M:%S")
+    full_text = f"📜 Летопись {day} (в {now}):\n\n{text}"
 
     for i in range(0, len(full_text), CHUNK_SIZE):
         await message.answer(full_text[i : i + CHUNK_SIZE])
