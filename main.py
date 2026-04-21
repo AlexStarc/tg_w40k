@@ -29,7 +29,9 @@ from database import (
     set_setting,
     delete_setting,
 )
-from summarizer import summarize, generate_character_titles
+import database as database_mod
+from summarizer import summarize, generate_character_titles, _fix_fragment_number
+import re as _re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -179,6 +181,34 @@ async def cmd_characters(message: Message):
     for name, title in chars:
         lines.append(f"• {name} = {title}")
     await message.answer("\n".join(lines))
+
+
+@dp.message(Command("fix_fragments"))
+async def cmd_fix_fragments(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    import aiosqlite
+    async with aiosqlite.connect(database_mod.DB_PATH) as db:
+        async with db.execute(
+            "SELECT date, summary FROM summaries WHERE chat_id=? ORDER BY date ASC",
+            (TARGET_CHAT_ID,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    fixes = []
+    num = 1
+    for date, text in rows:
+        fixed = _fix_fragment_number(text, num)
+        if fixed != text:
+            fixes.append(f"{date}: → {num}")
+            await save_summary(TARGET_CHAT_ID, date, fixed)
+        num += 1
+
+    if fixes:
+        await message.answer(f"✅ Исправлено:\n" + "\n".join(fixes))
+    else:
+        await message.answer("Все номера фрагментов уже корректны.")
 
 
 @dp.message(Command("character"))
