@@ -244,13 +244,20 @@ async def _run_writer(messages_payload: list[dict]) -> str:
     return result["choices"][0]["message"]["content"]
 
 
-async def _run_editor(summary: str, character_registry_str: str) -> str:
+async def _run_editor(
+    summary: str, character_registry_str: str, ratings_feedback: str = ""
+) -> str:
     editor_prompt = EDITOR_SYSTEM.format(character_registry=character_registry_str)
+    user_content = summary
+    if ratings_feedback:
+        user_content = f"{ratings_feedback}\n\n---\n\n{summary}"
+    else:
+        user_content = summary
     payload = {
         "model": PRIMARY_MODEL,
         "messages": [
             {"role": "system", "content": editor_prompt},
-            {"role": "user", "content": summary},
+            {"role": "user", "content": user_content},
         ],
         "max_tokens": MAX_TOKENS,
         "temperature": 0.3,
@@ -409,6 +416,7 @@ async def summarize(
     prev_summaries: list[tuple],
     characters: list[tuple],
     custom_writer_prompt: Optional[str] = None,
+    ratings_feedback: str = "",
 ) -> tuple[str, list[tuple[str, str]]]:
     """
     messages: list of (ts, username, text, reply_to_text)
@@ -476,7 +484,9 @@ async def summarize(
         summary = result["choices"][0]["message"]["content"]
 
     summary = _fix_fragment_number(summary, next_fragment)
-    summary = await _run_editor(summary, character_registry_str)
+    summary = await _run_editor(
+        summary, character_registry_str, ratings_feedback=ratings_feedback
+    )
     summary = _fix_fragment_number(summary, next_fragment)
     return summary, new_char_titles
 

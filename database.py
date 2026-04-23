@@ -214,6 +214,18 @@ async def get_avg_rating():
             return row[0] if row and row[0] else None
 
 
+async def get_last_ratings(chat_id: int, limit: int = 5):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT r.date, r.rating, s.summary "
+            "FROM ratings r "
+            "LEFT JOIN summaries s ON r.date = s.date AND s.chat_id = ? "
+            "ORDER BY r.date DESC LIMIT ?",
+            (chat_id, limit),
+        ) as cursor:
+            return await cursor.fetchall()
+
+
 async def get_setting(key: str):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

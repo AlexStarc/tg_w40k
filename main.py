@@ -25,6 +25,7 @@ from database import (
     upsert_character,
     save_rating,
     get_avg_rating,
+    get_last_ratings,
     get_setting,
     set_setting,
     delete_setting,
@@ -338,8 +339,27 @@ async def daily_summarize(target_date: str = None) -> bool:
 
     custom_prompt = await get_setting("writer_prompt")
 
+    ratings_feedback = ""
+    last_ratings = await get_last_ratings(TARGET_CHAT_ID, limit=3)
+    if last_ratings:
+        lines = ["ОЦЕНКИ ПРЕДЫДУЩИХ ЛЕТОПИСЕЙ (учти при редактировании):"]
+        for r_date, r_val, r_summary in last_ratings:
+            first_line = r_summary.split("\n")[0][:60] if r_summary else "(нет текста)"
+            if r_val >= 4:
+                hint = "хорошо, сохраняй стиль"
+            elif r_val == 3:
+                hint = "средне, старайся лучше"
+            else:
+                hint = "слабо, больше цитат и связных историй"
+            lines.append(f"- {r_date}: оценка {r_val}/5 ({first_line}...) — {hint}")
+        ratings_feedback = "\n".join(lines)
+
     summary, new_chars = await summarize(
-        messages, prev_summaries, characters, custom_writer_prompt=custom_prompt
+        messages,
+        prev_summaries,
+        characters,
+        custom_writer_prompt=custom_prompt,
+        ratings_feedback=ratings_feedback,
     )
 
     for name, title in new_chars:
