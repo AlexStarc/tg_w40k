@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import ADMIN_ID, TARGET_CHAT_ID, BAD_SUBSTRINGS, CHUNK_SIZE
@@ -18,6 +19,7 @@ from database import (
     get_filtered_messages_for_date,
     save_summary,
     get_last_summaries,
+    get_all_summaries,
     delete_old_messages,
     cleanup_old_data,
     get_all_characters,
@@ -125,9 +127,9 @@ async def cmd_rate(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    parts = message.text.strip().split()
-    if len(parts) != 2 or parts[1] not in {"1", "2", "3", "4", "5"}:
-        await message.answer("Использование: /rate <1-5>")
+    parts = message.text.strip().split(maxsplit=2)
+    if len(parts) < 2 or parts[1] not in {"1", "2", "3", "4", "5"}:
+        await message.answer("Использование: /rate <1-5> [комментарий]")
         return
 
     summaries = await get_last_summaries(TARGET_CHAT_ID, limit=1)
@@ -137,11 +139,13 @@ async def cmd_rate(message: Message):
 
     day, _ = summaries[0]
     rating = int(parts[1])
-    await save_rating(day, rating)
+    comment = parts[2] if len(parts) > 2 else None
+    await save_rating(day, rating, comment=comment)
 
     avg = await get_avg_rating()
-    avg_text = f" (средняя оценка: {avg:.1f})" if avg else ""
-    await message.answer(f"Оценка {rating} за {day} сохранена.{avg_text}")
+    avg_text = f" (средняя: {avg:.1f})" if avg else ""
+    comment_text = f"\n💬 {comment}" if comment else ""
+    await message.answer(f"Оценка {rating} за {day} сохранена.{avg_text}{comment_text}")
 
 
 @dp.message(Command("regenerate"))
@@ -267,6 +271,69 @@ async def cmd_stats(message: Message):
     )
 
 
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    rows = await get_all_summaries(TARGET_CHAT_ID)
+    if not rows:
+        await message.answer("Летописей нет.")
+        return
+
+    lines = ["📜 Все летописи:\n"]
+    for dt, preview in rows:
+        lines.append(f"• {dt} — {preview}...")
+    await message.answer("\n".join(lines))
+
+
+@dp.callback_query(F.data.startswith("show:"))
+async def cb_show(callback: CallbackQuery):
+    _, day = callback.data.split(":", 1)
+    summaries = await get_last_summaries(TARGET_CHAT_ID, limit=10)
+    text = None
+    for d, t in summaries:
+        if d == day:
+            text = t
+            break
+    if not text:
+        await callback.answer("Летопись не найдена")
+        return
+    full_text = f"📜 Летопись {day}:\n\n{text}"
+    for i in range(0, len(full_text), CHUNK_SIZE):
+        await callback.message.answer(full_text[i : i + CHUNK_SIZE])
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("send:"))
+async def cb_send(callback: CallbackQuery):
+    _, day = callback.data.split(":", 1)
+    summaries = await get_last_summaries(TARGET_CHAT_ID, limit=10)
+    text = None
+    for d, t in summaries:
+        if d == day:
+            text = t
+            break
+    if not text:
+        await callback.answer("Летопись не найдена")
+        return
+    full_text = f"📜 Летопись {day}:\n\n{text}"
+    for i in range(0, len(full_text), CHUNK_SIZE):
+        await bot.send_message(TARGET_CHAT_ID, full_text[i : i + CHUNK_SIZE])
+    await callback.answer("Отправлено в чат")
+
+
+@dp.callback_query(F.data.startswith("rate:"))
+async def cb_rate(callback: CallbackQuery):
+    _, day, val = callback.data.split(":")
+    rating = int(val)
+    await save_rating(day, rating)
+    avg = await get_avg_rating()
+    avg_text = f" (средняя: {avg:.1f})" if avg else ""
+    await callback.answer(f"Оценка {rating} за {day}{avg_text}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
     if message.chat.id != TARGET_CHAT_ID:
@@ -343,7 +410,7 @@ async def daily_summarize(target_date: str = None) -> bool:
     last_ratings = await get_last_ratings(TARGET_CHAT_ID, limit=3)
     if last_ratings:
         lines = ["ОЦЕНКИ ПРЕДЫДУЩИХ ЛЕТОПИСЕЙ (учти при редактировании):"]
-        for r_date, r_val, r_summary in last_ratings:
+        for r_date, r_val, r_summary, r_comment in last_ratings:
             first_line = r_summary.split("\n")[0][:60] if r_summary else "(нет текста)"
             if r_val >= 4:
                 hint = "хорошо, сохраняй стиль"
@@ -351,7 +418,10 @@ async def daily_summarize(target_date: str = None) -> bool:
                 hint = "средне, старайся лучше"
             else:
                 hint = "слабо, больше цитат и связных историй"
-            lines.append(f"- {r_date}: оценка {r_val}/5 ({first_line}...) — {hint}")
+            comment_text = f" | отзыв: {r_comment}" if r_comment else ""
+            lines.append(
+                f"- {r_date}: оценка {r_val}/5 ({first_line}...) — {hint}{comment_text}"
+            )
         ratings_feedback = "\n".join(lines)
 
     summary, new_chars = await summarize(
@@ -371,13 +441,21 @@ async def daily_summarize(target_date: str = None) -> bool:
     await save_summary(TARGET_CHAT_ID, yesterday, summary)
     logger.info("Саммаризация за %s сохранена (%d символов).", yesterday, len(summary))
 
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📜 Прочитать", callback_data=f"show:{yesterday}")
+    builder.button(text="📤 В чат", callback_data=f"send:{yesterday}")
+    builder.row(
+        InlineKeyboardButton(text="⭐5", callback_data=f"rate:{yesterday}:5"),
+        InlineKeyboardButton(text="4", callback_data=f"rate:{yesterday}:4"),
+        InlineKeyboardButton(text="3", callback_data=f"rate:{yesterday}:3"),
+        InlineKeyboardButton(text="2", callback_data=f"rate:{yesterday}:2"),
+        InlineKeyboardButton(text="1💩", callback_data=f"rate:{yesterday}:1"),
+    )
+
     await bot.send_message(
         ADMIN_ID,
-        f"✅ Летопись за {yesterday} готова.\n"
-        f"/summary — посмотреть\n"
-        f"/send_to_chat — отправить в чат\n"
-        f"/rate <1-5> — оценить\n"
-        f"/cleanup — удалить сырые сообщения",
+        f"✅ Летопись за {yesterday} готова ({len(summary)} символов).",
+        reply_markup=builder.as_markup(),
     )
     logger.info("daily_summarize FINISHED")
     return True

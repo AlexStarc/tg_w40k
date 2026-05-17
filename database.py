@@ -1,5 +1,8 @@
 import aiosqlite
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+_MSK = ZoneInfo("Europe/Moscow")
 
 DB_PATH = "bot.db"
 
@@ -50,9 +53,15 @@ async def migrate_db():
             CREATE TABLE IF NOT EXISTS ratings (
                 date TEXT PRIMARY KEY,
                 rating INTEGER,
+                comment TEXT,
                 created_at INTEGER
             )
         """)
+        cursor = await db.execute("PRAGMA table_info(ratings)")
+        rating_cols = {row[1] for row in await cursor.fetchall()}
+        if "comment" not in rating_cols:
+            await db.execute("ALTER TABLE ratings ADD COLUMN comment TEXT")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -73,7 +82,7 @@ async def migrate_db():
 
 
 async def save_message(chat_id, username, text, message_id=None, reply_to_text=None):
-    today = date.today().isoformat()
+    today = datetime.now(_MSK).date().isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO messages (chat_id, date, ts, username, text, message_id, reply_to_text) "
@@ -126,6 +135,16 @@ async def save_summary(chat_id, day: str, summary: str):
             (chat_id, day, summary),
         )
         await db.commit()
+
+
+async def get_all_summaries(chat_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT date, substr(summary, 1, 60) FROM summaries "
+            "WHERE chat_id=? ORDER BY date DESC",
+            (chat_id,),
+        ) as cursor:
+            return await cursor.fetchall()
 
 
 async def get_last_summaries(chat_id, limit=5):
@@ -197,12 +216,12 @@ async def upsert_character(username: str, wh40k_title: str):
         await db.commit()
 
 
-async def save_rating(day: str, rating: int):
+async def save_rating(day: str, rating: int, comment: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO ratings (date, rating, created_at) "
-            "VALUES (?, ?, strftime('%s','now'))",
-            (day, rating),
+            "INSERT OR REPLACE INTO ratings (date, rating, comment, created_at) "
+            "VALUES (?, ?, ?, strftime('%s','now'))",
+            (day, rating, comment),
         )
         await db.commit()
 
@@ -217,7 +236,7 @@ async def get_avg_rating():
 async def get_last_ratings(chat_id: int, limit: int = 5):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT r.date, r.rating, s.summary "
+            "SELECT r.date, r.rating, s.summary, r.comment "
             "FROM ratings r "
             "LEFT JOIN summaries s ON r.date = s.date AND s.chat_id = ? "
             "ORDER BY r.date DESC LIMIT ?",

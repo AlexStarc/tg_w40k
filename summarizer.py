@@ -331,7 +331,11 @@ async def _map_reduce_analyze(
         if fn > max_fragment:
             max_fragment = fn
 
-    unique_topics = merged_topics[:5]
+    unique_topics = sorted(merged_topics, key=lambda t: t.get("priority", 1), reverse=True)
+    low_prio = [t for t in unique_topics if t.get("priority", 1) == 1]
+    high_prio = [t for t in unique_topics if t.get("priority", 1) >= 2]
+    unique_topics = high_prio + (low_prio[:1] if low_prio else [])
+    unique_topics = unique_topics[:5]
     unique_quotes = list(dict.fromkeys(merged_quotes))[:5]
 
     seen_names = set()
