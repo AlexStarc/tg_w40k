@@ -323,6 +323,21 @@ async def cb_send(callback: CallbackQuery):
     await callback.answer("Отправлено в чат")
 
 
+@dp.callback_query(F.data.startswith("retry:"))
+async def cb_retry(callback: CallbackQuery):
+    _, day = callback.data.split(":", 1)
+    await callback.message.edit_text("Генерирую ещё раз...")
+    try:
+        ok = await daily_summarize(target_date=day)
+        if ok:
+            await callback.message.edit_text(f"✅ Летопись за {day} перегенерирована.")
+        else:
+            await callback.message.edit_text(f"⚠ Нет сообщений за {day}.")
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Снова ошибка:\n{e}")
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("rate:"))
 async def cb_rate(callback: CallbackQuery):
     _, day, val = callback.data.split(":")
@@ -424,13 +439,24 @@ async def daily_summarize(target_date: str = None) -> bool:
             )
         ratings_feedback = "\n".join(lines)
 
-    summary, new_chars = await summarize(
-        messages,
-        prev_summaries,
-        characters,
-        custom_writer_prompt=custom_prompt,
-        ratings_feedback=ratings_feedback,
-    )
+    try:
+        summary, new_chars = await summarize(
+            messages,
+            prev_summaries,
+            characters,
+            custom_writer_prompt=custom_prompt,
+            ratings_feedback=ratings_feedback,
+        )
+    except Exception as e:
+        logger.exception("Generation failed for %s", yesterday)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Повторить за %s" % yesterday, callback_data=f"retry:{yesterday}")
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Ошибка генерации за {yesterday}:\n{e}\n\nНажми кнопку для повтора.",
+            reply_markup=builder.as_markup(),
+        )
+        return False
 
     for name, title in new_chars:
         existing = await get_character(name)
