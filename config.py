@@ -10,6 +10,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")
 CHAT_ID_STR = os.getenv("CHAT_ID")
 GLM_API_KEY = os.getenv("GLM_API_KEY")
+TG_PROXY = os.getenv("TG_PROXY")
 
 _missing = []
 if not BOT_TOKEN:

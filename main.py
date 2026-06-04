@@ -8,12 +8,13 @@ from zoneinfo import ZoneInfo
 from aiogram import F, Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import ADMIN_ID, TARGET_CHAT_ID, BAD_SUBSTRINGS, CHUNK_SIZE
+from config import ADMIN_ID, TARGET_CHAT_ID, BAD_SUBSTRINGS, CHUNK_SIZE, TG_PROXY
 from database import (
     init_db,
     migrate_db,
@@ -496,10 +497,16 @@ async def main():
 
     bot_token = os.getenv("BOT_TOKEN")
     global bot
+
+    session = None
+    if TG_PROXY:
+        session = AiohttpSession(proxy=TG_PROXY)
+
     bot = Bot(
         token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         request_timeout=60,
+        session=session,
     )
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
