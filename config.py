@@ -12,6 +12,13 @@ CHAT_ID_STR = os.getenv("CHAT_ID")
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TG_PROXY = os.getenv("TG_PROXY")
 
+TG_PROXIES = [
+    "socks5://93.90.231.101:1080",
+    "socks5://184.178.172.18:15280",
+    "socks5://192.252.214.20:15864",
+    "http://93.90.231.101:1080",
+]
+
 _missing = []
 if not BOT_TOKEN:
     _missing.append("BOT_TOKEN")

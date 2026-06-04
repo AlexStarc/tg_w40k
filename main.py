@@ -499,8 +499,22 @@ async def main():
     global bot
 
     session = None
-    if TG_PROXY:
-        session = AiohttpSession(proxy=TG_PROXY)
+    proxies_to_try = [TG_PROXY] if TG_PROXY else TG_PROXIES
+
+    for proxy_url in proxies_to_try:
+        if not proxy_url:
+            continue
+        try:
+            session = AiohttpSession(proxy=proxy_url)
+            test_bot = Bot(token=bot_token, session=session, request_timeout=10)
+            logger.info("Testing proxy: %s", proxy_url)
+            await test_bot.get_me()
+            logger.info("Proxy works: %s", proxy_url)
+            break
+        except Exception as e:
+            logger.warning("Proxy %s failed: %s, trying next...", proxy_url, e)
+            session = None
+            continue
 
     bot = Bot(
         token=bot_token,
@@ -508,6 +522,7 @@ async def main():
         request_timeout=60,
         session=session,
     )
+    logger.info("Bot initialized%s", f" with proxy: {proxies_to_try[0]}" if session else " without proxy")
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
