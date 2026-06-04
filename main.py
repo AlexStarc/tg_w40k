@@ -498,10 +498,8 @@ async def main():
     global bot
     bot = Bot(
         token=bot_token,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML,
-            request_timeout=60,
-        ),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        request_timeout=60,
     )
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
