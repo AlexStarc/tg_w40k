@@ -506,22 +506,31 @@ async def main():
     global bot
 
     session = None
-    proxies_to_try = [TG_PROXY] if TG_PROXY else TG_PROXIES
+    proxies_to_try = []
 
-    for proxy_url in proxies_to_try:
-        if not proxy_url:
-            continue
-        try:
-            session = AiohttpSession(proxy=proxy_url)
-            test_bot = Bot(token=bot_token, session=session, request_timeout=10)
-            logger.info("Testing proxy: %s", proxy_url)
-            await test_bot.get_me()
-            logger.info("Proxy works: %s", proxy_url)
-            break
-        except Exception as e:
-            logger.warning("Proxy %s failed: %s, trying next...", proxy_url, e)
-            session = None
-            continue
+    try:
+        logger.info("Testing direct connection without proxy...")
+        test_bot = Bot(token=bot_token, request_timeout=10)
+        await test_bot.get_me()
+        logger.info("Direct connection works, no proxy needed")
+    except Exception as e:
+        logger.warning("Direct connection failed: %s, trying proxies...", e)
+        proxies_to_try = TG_PROXIES if TG_PROXY else TG_PROXIES
+
+        for proxy_url in proxies_to_try:
+            if not proxy_url:
+                continue
+            try:
+                logger.info("Testing proxy: %s", proxy_url)
+                session = AiohttpSession(proxy=proxy_url)
+                test_bot = Bot(token=bot_token, session=session, request_timeout=10)
+                await test_bot.get_me()
+                logger.info("Proxy works: %s", proxy_url)
+                break
+            except Exception as pe:
+                logger.warning("Proxy %s failed: %s, trying next...", proxy_url, pe)
+                session = None
+                continue
 
     bot = Bot(
         token=bot_token,
