@@ -14,7 +14,14 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import ADMIN_ID, TARGET_CHAT_ID, BAD_SUBSTRINGS, CHUNK_SIZE, TG_PROXY
+from config import (
+    ADMIN_ID,
+    TARGET_CHAT_ID,
+    BAD_SUBSTRINGS,
+    CHUNK_SIZE,
+    TG_PROXY,
+    TG_PROXIES,
+)
 from database import (
     init_db,
     migrate_db,
