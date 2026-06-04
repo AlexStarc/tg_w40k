@@ -6,6 +6,8 @@ from datetime import timedelta, datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -494,7 +496,13 @@ async def main():
 
     bot_token = os.getenv("BOT_TOKEN")
     global bot
-    bot = Bot(token=bot_token)
+    bot = Bot(
+        token=bot_token,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+            request_timeout=60,
+        ),
+    )
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
