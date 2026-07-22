@@ -26,6 +26,7 @@ from config import (
     UNSPLASH_API_KEY,
     PIXABAY_API_KEY,
     PRIMARY_MODEL,
+    MAX_TOKENS,
 )
 from database import (
     init_db,
@@ -562,14 +563,24 @@ async def refresh_meme_bank(n: int = 8) -> dict:
                 f"Придумай {n} НОВЫх пар. Ответ — СТРОГО JSON-массив, без markdown и пояснений."
             )},
         ],
-        "max_tokens": 2500,
+        "max_tokens": MAX_TOKENS,
         "temperature": 0.9,
     }
     result = await _call_glm(payload)
-    raw = result["choices"][0]["message"]["content"]
+    choice = result["choices"][0]
+    msg = choice.get("message") or {}
+    finish = choice.get("finish_reason")
+    raw = (msg.get("content") or "").strip()
+    if not raw:
+        raw = (msg.get("reasoning_content") or "").strip()
+        if raw:
+            logger.info("meme seed: content empty, using reasoning_content (%d chars)", len(raw))
+    if not raw:
+        logger.warning("meme seed: empty response. finish_reason=%s msg_keys=%s",
+                       finish, list(msg.keys()))
     pairs = _extract_pairs(raw)
     if not pairs:
-        logger.warning("meme seed: no JSON parsed. raw[:300]=%s", raw[:300])
+        logger.warning("meme seed: no JSON parsed (%d chars). raw[:300]=%s", len(raw), raw[:300])
     existing_lower = {e.quote.lower().strip() for e in bank}
     added = 0
     for p in pairs:
