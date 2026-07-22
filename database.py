@@ -1,10 +1,11 @@
+import os
 import aiosqlite
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 _MSK = ZoneInfo("Europe/Moscow")
 
-DB_PATH = "bot.db"
+DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 
 async def init_db():
@@ -66,6 +67,16 @@ async def migrate_db():
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS meme_ratings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id TEXT,
+                layout TEXT,
+                rating INTEGER,
+                created_at INTEGER
             )
         """)
 
@@ -268,3 +279,31 @@ async def delete_setting(key: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM settings WHERE key = ?", (key,))
         await db.commit()
+
+
+async def save_meme_rating(entry_id: str, layout: str, rating: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO meme_ratings (entry_id, layout, rating, created_at) "
+            "VALUES (?, ?, ?, strftime('%s','now'))",
+            (entry_id, layout, rating),
+        )
+        await db.commit()
+
+
+async def get_meme_bias() -> dict:
+    """Average rating per entry_id and per layout, for weighted generation.
+    Returns empty dict if the table is not yet migrated."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            async with db.execute(
+                "SELECT entry_id, AVG(rating) FROM meme_ratings GROUP BY entry_id"
+            ) as c:
+                entry = {row[0]: row[1] for row in await c.fetchall()}
+            async with db.execute(
+                "SELECT layout, AVG(rating) FROM meme_ratings GROUP BY layout"
+            ) as c:
+                layout = {row[0]: row[1] for row in await c.fetchall()}
+        except aiosqlite.OperationalError:
+            return {"entry": {}, "layout": {}}
+    return {"entry": entry, "layout": layout}

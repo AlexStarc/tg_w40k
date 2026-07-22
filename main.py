@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, InputMediaPhoto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -21,6 +21,10 @@ from config import (
     CHUNK_SIZE,
     TG_PROXY,
     TG_PROXIES,
+    MEME_CHANNEL_ID,
+    PEXELS_API_KEY,
+    UNSPLASH_API_KEY,
+    PIXABAY_API_KEY,
 )
 from database import (
     init_db,
@@ -41,9 +45,12 @@ from database import (
     get_setting,
     set_setting,
     delete_setting,
+    save_meme_rating,
+    get_meme_bias,
 )
 import database as database_mod
 from summarizer import summarize, generate_character_titles, _fix_fragment_number
+import meme as meme_mod
 import re as _re
 
 logging.basicConfig(
@@ -357,6 +364,153 @@ async def cb_rate(callback: CallbackQuery):
     avg_text = f" (средняя: {avg:.1f})" if avg else ""
     await callback.answer(f"Оценка {rating} за {day}{avg_text}")
     await callback.message.edit_reply_markup(reply_markup=None)
+
+
+# ---- meme generator (crisiswoman): review-then-publish, parallel to summary ----
+
+async def _gen_meme(entry_id: str | None = None):
+    bias = await get_meme_bias()
+    res = await meme_mod.generate_meme(
+        entry_id=entry_id, bias=bias,
+        pexels_key=PEXELS_API_KEY, unsplash_key=UNSPLASH_API_KEY,
+        pixabay_key=PIXABAY_API_KEY,
+    )
+    meme_mod.cache_meme(res)   # small rotating history on disk (gitignored)
+    return res
+
+
+def _meme_caption(res: dict) -> str:
+    return (f"стиль: <b>{res['layout']}</b> · {res['source']} · "
+            f"[{res['tone']}] · {res['quote'][:40]}…")
+
+
+def _meme_kb(entry_id: str, layout: str):
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📤 Опубликовать", callback_data="meme:pub"))
+    b.row(InlineKeyboardButton(text="🎨 Другой стиль", callback_data=f"meme:stl:{entry_id}"),
+          InlineKeyboardButton(text="🔄 Другая цитата", callback_data="meme:new"))
+    b.row(*[InlineKeyboardButton(text=label, callback_data=f"meme:rate:{entry_id}:{layout}:{n}")
+            for n, label in ((5, "⭐5"), (4, "4"), (3, "3"), (2, "2"), (1, "1💩"))])
+    b.row(InlineKeyboardButton(text="❌", callback_data="meme:del"))
+    return b.as_markup()
+
+
+@dp.message(Command("meme"))
+async def cmd_meme(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not MEME_CHANNEL_ID:
+        await message.answer("MEME_CHANNEL_ID не задан в .env — публикация отключена.")
+        return
+    status = await message.answer("🎨 Генерирую мём…")
+    try:
+        res = await _gen_meme()
+        await status.delete()
+        await bot.send_photo(
+            ADMIN_ID,
+            BufferedInputFile(res["image"], filename="meme.jpg"),
+            caption=_meme_caption(res),
+            reply_markup=_meme_kb(res["entry_id"], res["layout"]),
+        )
+    except Exception as e:
+        logger.exception("meme generation failed")
+        await message.answer(f"❌ Ошибка генерации мема: {e}")
+
+
+async def _meme_edit(callback: CallbackQuery, entry_id: str | None):
+    res = await _gen_meme(entry_id=entry_id)
+    media = InputMediaPhoto(
+        media=BufferedInputFile(res["image"], filename="meme.jpg"),
+        caption=_meme_caption(res),
+    )
+    await callback.message.edit_media(media, reply_markup=_meme_kb(res["entry_id"], res["layout"]))
+
+
+@dp.callback_query(F.data == "meme:new")
+async def cb_meme_new(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.answer("Новый мём")
+    try:
+        await _meme_edit(callback, None)
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("meme:stl:"))
+async def cb_meme_style(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    entry_id = callback.data.split(":", 2)[2]
+    await callback.answer("Другой стиль")
+    try:
+        await _meme_edit(callback, entry_id)
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+@dp.callback_query(F.data == "meme:pub")
+async def cb_meme_pub(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    if not callback.message.photo:
+        await callback.answer("Фото недоступно — сгенерируй заново /meme", show_alert=True)
+        return
+    try:
+        await bot.send_photo(MEME_CHANNEL_ID, callback.message.photo[-1].file_id)
+        await callback.message.edit_caption(
+            caption=(callback.message.caption or "") + "\n\n✅ ОПУБЛИКОВАНО",
+            reply_markup=None,
+        )
+        await callback.answer("Опубликовано в канал")
+    except Exception as e:
+        logger.exception("meme publish failed")
+        await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
+
+
+@dp.callback_query(F.data == "meme:del")
+async def cb_meme_del(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.delete()
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("meme:rate:"))
+async def cb_meme_rate(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    _, _, entry_id, layout, val = callback.data.split(":")
+    await save_meme_rating(entry_id, layout, int(val))
+    bias = await get_meme_bias()
+    e_avg = bias["entry"].get(entry_id)
+    l_avg = bias["layout"].get(layout)
+    msg = f"Оценка {val}"
+    bits = []
+    if e_avg:
+        bits.append(f"цитата {e_avg:.1f}")
+    if l_avg:
+        bits.append(f"стиль {l_avg:.1f}")
+    if bits:
+        msg += f" (ср. {' / '.join(bits)})"
+    await callback.answer(msg)
+
+
+@dp.message(Command("meme_add"))
+async def cmd_meme_add(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    payload = message.text.partition(" ")[2].strip()
+    parts = [p.strip() for p in payload.split("::")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        await message.answer("Формат: <code>/meme_add цитата :: панчлайн :: dark</code>\n"
+                             "(третья часть — тон, по умолчанию light)")
+        return
+    quote, punch = parts[0], parts[1]
+    tone = parts[2].strip().lower() if len(parts) > 2 and parts[2].strip() else "light"
+    eid = meme_mod.append_entry(quote, punch, tone)
+    await message.answer(f"✅ Добавлено в банк (<code>{eid}</code>):\n"
+                         f"«{quote}» → {punch}")
 
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))

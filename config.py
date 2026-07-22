@@ -11,6 +11,10 @@ ADMIN_ID_STR = os.getenv("ADMIN_ID")
 CHAT_ID_STR = os.getenv("CHAT_ID")
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TG_PROXY = os.getenv("TG_PROXY")
+MEME_CHANNEL_ID_STR = os.getenv("MEME_CHANNEL_ID")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+UNSPLASH_API_KEY = os.getenv("UNSPLASH_API_KEY")
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 
 TG_PROXIES = [
     "socks5://93.90.231.101:1080",
@@ -35,6 +39,8 @@ if _missing:
 
 ADMIN_ID = int(ADMIN_ID_STR)
 TARGET_CHAT_ID = int(CHAT_ID_STR)
+# channel may be numeric id or "@username"
+MEME_CHANNEL_ID = MEME_CHANNEL_ID_STR if MEME_CHANNEL_ID_STR and MEME_CHANNEL_ID_STR.startswith("@") else (int(MEME_CHANNEL_ID_STR) if MEME_CHANNEL_ID_STR else None)
 
 BAD_SUBSTRINGS = [
     "подработка",

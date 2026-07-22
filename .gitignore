@@ -26,6 +26,9 @@ data/
 bot.db
 bot_server.db
 
+# Generated meme artifacts (never commit — reproducible at runtime)
+memes_cache/
+
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
