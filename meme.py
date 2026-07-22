@@ -491,6 +491,21 @@ def append_entry(quote: str, punchline: str, tone: str = "light",
     return eid
 
 
+def cap_bank(auto_cap: int = 120) -> int:
+    """Bound growth: drop the oldest auto-added entries (id starts with 'u'),
+    keeping all hand-authored ones. Returns number removed."""
+    raw = json.loads(BANK_PATH.read_text(encoding="utf-8"))
+    auto_idx = [i for i, e in enumerate(raw) if e.get("id", "").startswith("u")]
+    if len(auto_idx) <= auto_cap:
+        return 0
+    drop_count = len(auto_idx) - auto_cap
+    drop = set(auto_idx[:drop_count])
+    kept = [e for i, e in enumerate(raw) if i not in drop]
+    BANK_PATH.write_text(json.dumps(kept, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+    return drop_count
+
+
 async def generate_meme(bank: list[Entry] | None = None,
                         entry_id: str | None = None,
                         style: Style | None = None,

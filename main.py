@@ -25,6 +25,7 @@ from config import (
     PEXELS_API_KEY,
     UNSPLASH_API_KEY,
     PIXABAY_API_KEY,
+    PRIMARY_MODEL,
 )
 from database import (
     init_db,
@@ -49,9 +50,12 @@ from database import (
     get_meme_bias,
 )
 import database as database_mod
-from summarizer import summarize, generate_character_titles, _fix_fragment_number
+from summarizer import summarize, generate_character_titles, _fix_fragment_number, _call_glm
 import meme as meme_mod
+import json as _json
+import random as _random
 import re as _re
+from prompts import MEME_SEED_SYSTEM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -513,6 +517,84 @@ async def cmd_meme_add(message: Message):
                          f"«{quote}» → {punch}")
 
 
+async def refresh_meme_bank(n: int = 8) -> int:
+    """Generate n new quote+punchline pairs via GLM and append (deduped) to
+    bank.json. Quality is policed downstream by the rating→bias feedback loop:
+    weak pairs get low ratings and stop appearing."""
+    bank = meme_mod.load_bank()
+    examples = _random.sample(bank, min(6, len(bank)))
+    ex_block = "\n".join(f'- «{e.quote}» → {e.punchline} [{e.tone}]' for e in examples)
+    existing = "; ".join(e.quote for e in bank)[:1500]
+    payload = {
+        "model": PRIMARY_MODEL,
+        "messages": [
+            {"role": "system", "content": MEME_SEED_SYSTEM},
+            {"role": "user", "content": (
+                f"Примеры стиля:\n{ex_block}\n\n"
+                f"Уже есть (не повторяй): {existing}\n\n"
+                f"Придумай {n} НОВЫХ пар. Только JSON-массив, без markdown и пояснений."
+            )},
+        ],
+        "max_tokens": 2500,
+        "temperature": 0.9,
+    }
+    result = await _call_glm(payload)
+    raw = result["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        nl = raw.find("\n")
+        lb = raw.rfind("```")
+        if nl != -1 and lb > nl:
+            raw = raw[nl + 1:lb]
+    try:
+        pairs = _json.loads(raw)
+    except _json.JSONDecodeError:
+        logger.warning("meme seed returned non-JSON: %s", raw[:200])
+        return 0
+    existing_lower = {e.quote.lower().strip() for e in bank}
+    added = 0
+    for p in pairs:
+        q = (p.get("quote") or "").strip().strip("«»\"'")
+        punch = (p.get("punchline") or "").strip()
+        if not q or not punch or q.lower() in existing_lower:
+            continue
+        tone = "dark" if str(p.get("tone", "")).lower().startswith("d") else "light"
+        meme_mod.append_entry(q, punch, tone)
+        existing_lower.add(q.lower())
+        added += 1
+    meme_mod.cap_bank()
+    return added
+
+
+async def daily_refresh_bank():
+    try:
+        added = await refresh_meme_bank(8)
+        logger.info("meme bank refreshed: +%d", added)
+        await bot.send_message(ADMIN_ID, f"➕ Банк мемов пополнен: +{added} цитат")
+    except Exception:
+        logger.exception("meme bank refresh failed")
+
+
+@dp.message(Command("meme_seed"))
+async def cmd_meme_seed(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = (message.text or "").split()
+    n = 8
+    if len(args) > 1:
+        try:
+            n = max(1, min(int(args[1]), 20))
+        except ValueError:
+            n = 8
+    status = await message.answer(f"🌱 Генерирую {n} новых цитат через GLM…")
+    try:
+        added = await refresh_meme_bank(n)
+        await status.delete()
+        await message.answer(f"✅ Добавлено {added} новых цитат в банк")
+    except Exception as e:
+        logger.exception("meme_seed failed")
+        await message.answer(f"❌ {e}")
+
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
     if message.chat.id != TARGET_CHAT_ID:
@@ -706,6 +788,13 @@ async def main():
         auto_cleanup,
         "cron",
         hour=3,
+        minute=0,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        daily_refresh_bank,
+        "cron",
+        hour=4,
         minute=0,
         misfire_grace_time=3600,
     )

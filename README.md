@@ -54,6 +54,7 @@ python main.py
 |---|---|
 | `/meme` | Generate a meme, send it to the admin for review (admin only) |
 | `/meme_add quote :: punchline :: dark` | Append a quote+punchline pair to `bank.json` (`:: tone` optional, default `light`) |
+| `/meme_seed [N]` | Generate N (default 8) new quote pairs via GLM and append to the bank (admin only) |
 
 ## How It Works
 
@@ -83,6 +84,11 @@ the result to the admin for review before publishing to the configured channel.
    20% exploration rate keeps the pool from collapsing
 4. New material enters `bank.json` via `/meme_add` (or by hand); the file is plain
    JSON, so it can be edited or re-seeded freely
+5. The bank also **auto-refreshes**: a scheduled GLM job (04:00 MSK, alongside the
+   daily chronicle cycle) generates ~8 new pairs and appends them (deduped). Growth
+   is capped (oldest auto-pairs pruned beyond 120). Since freshly-added pairs start
+   unrated, weak ones sink out of rotation once rated low — the feedback loop keeps
+   the bank clean. `/meme_seed N` triggers a manual refresh
 
 ## Deployment
 
