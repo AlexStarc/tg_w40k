@@ -384,8 +384,8 @@ async def _gen_meme(entry_id: str | None = None):
 
 
 def _meme_caption(res: dict) -> str:
-    return (f"стиль: <b>{res['layout']}</b> · {res['source']} · "
-            f"[{res['tone']}] · {res['quote'][:40]}…")
+    return (f"стиль: <b>{res['layout']}</b> · фон: {res.get('img_source','?')} · "
+            f"{res['source']} · [{res['tone']}] · {res['quote'][:40]}…")
 
 
 def _meme_kb(entry_id: str, layout: str):
@@ -517,7 +517,34 @@ async def cmd_meme_add(message: Message):
                          f"«{quote}» → {punch}")
 
 
-async def refresh_meme_bank(n: int = 8) -> int:
+def _extract_pairs(raw: str) -> list:
+    """Robustly pull a JSON array out of an LLM response that may wrap it in
+    prose, markdown fences, or return {quotes:[...]}."""
+    raw = raw.strip()
+    try:
+        v = _json.loads(raw)
+        if isinstance(v, list):
+            return v
+        if isinstance(v, dict):
+            return v.get("quotes") or v.get("pairs") or v.get("data") or []
+    except _json.JSONDecodeError:
+        pass
+    m = _re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, _re.DOTALL)
+    if m:
+        try:
+            return _json.loads(m.group(1))
+        except _json.JSONDecodeError:
+            pass
+    s, e = raw.find("["), raw.rfind("]")
+    if s != -1 and e > s:
+        try:
+            return _json.loads(raw[s:e + 1])
+        except _json.JSONDecodeError:
+            pass
+    return []
+
+
+async def refresh_meme_bank(n: int = 8) -> dict:
     """Generate n new quote+punchline pairs via GLM and append (deduped) to
     bank.json. Quality is policed downstream by the rating→bias feedback loop:
     weak pairs get low ratings and stop appearing."""
@@ -532,28 +559,21 @@ async def refresh_meme_bank(n: int = 8) -> int:
             {"role": "user", "content": (
                 f"Примеры стиля:\n{ex_block}\n\n"
                 f"Уже есть (не повторяй): {existing}\n\n"
-                f"Придумай {n} НОВЫХ пар. Только JSON-массив, без markdown и пояснений."
+                f"Придумай {n} НОВЫх пар. Ответ — СТРОГО JSON-массив, без markdown и пояснений."
             )},
         ],
         "max_tokens": 2500,
         "temperature": 0.9,
     }
     result = await _call_glm(payload)
-    raw = result["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        nl = raw.find("\n")
-        lb = raw.rfind("```")
-        if nl != -1 and lb > nl:
-            raw = raw[nl + 1:lb]
-    try:
-        pairs = _json.loads(raw)
-    except _json.JSONDecodeError:
-        logger.warning("meme seed returned non-JSON: %s", raw[:200])
-        return 0
+    raw = result["choices"][0]["message"]["content"]
+    pairs = _extract_pairs(raw)
+    if not pairs:
+        logger.warning("meme seed: no JSON parsed. raw[:300]=%s", raw[:300])
     existing_lower = {e.quote.lower().strip() for e in bank}
     added = 0
     for p in pairs:
-        q = (p.get("quote") or "").strip().strip("«»\"'")
+        q = (p.get("quote") or "").strip().strip("«»\"'\"")
         punch = (p.get("punchline") or "").strip()
         if not q or not punch or q.lower() in existing_lower:
             continue
@@ -562,14 +582,18 @@ async def refresh_meme_bank(n: int = 8) -> int:
         existing_lower.add(q.lower())
         added += 1
     meme_mod.cap_bank()
-    return added
+    return {"added": added, "received": len(pairs), "raw_len": len(raw),
+            "sample": pairs[0] if pairs else None}
 
 
 async def daily_refresh_bank():
     try:
-        added = await refresh_meme_bank(8)
-        logger.info("meme bank refreshed: +%d", added)
-        await bot.send_message(ADMIN_ID, f"➕ Банк мемов пополнен: +{added} цитат")
+        res = await refresh_meme_bank(8)
+        logger.info("meme bank refreshed: +%d (received %d)", res["added"], res["received"])
+        await bot.send_message(
+            ADMIN_ID,
+            f"➕ Банк мемов пополнен: +{res['added']} цитат (GLM вернул {res['received']})",
+        )
     except Exception:
         logger.exception("meme bank refresh failed")
 
@@ -587,9 +611,18 @@ async def cmd_meme_seed(message: Message):
             n = 8
     status = await message.answer(f"🌱 Генерирую {n} новых цитат через GLM…")
     try:
-        added = await refresh_meme_bank(n)
+        res = await refresh_meme_bank(n)
         await status.delete()
-        await message.answer(f"✅ Добавлено {added} новых цитат в банк")
+        if res["added"]:
+            await message.answer(
+                f"✅ Добавлено {res['added']} цитат (GLM вернул {res['received']} пар)")
+        else:
+            tail = ""
+            if res["received"]:
+                tail = f" — но все дубли/пустые"
+            else:
+                tail = f" — GLM не вернул разборный JSON ({res['raw_len']} симв). Подробности в журнале."
+            await message.answer(f"⚠️ Не добавлено ни одной (получено {res['received']}){tail}")
     except Exception as e:
         logger.exception("meme_seed failed")
         await message.answer(f"❌ {e}")

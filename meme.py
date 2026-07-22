@@ -389,7 +389,8 @@ async def _pexels(client, key):
     photos = r.json().get("photos") or []
     if not photos:
         return None
-    return await _fetch_img(client, random.choice(photos)["src"]["large2x"])
+    img = await _fetch_img(client, random.choice(photos)["src"]["large2x"])
+    return (img, "pexels") if img else None
 
 
 async def _unsplash(client, key):
@@ -403,7 +404,8 @@ async def _unsplash(client, key):
     res = r.json().get("results") or []
     if not res:
         return None
-    return await _fetch_img(client, random.choice(res)["urls"]["regular"])
+    img = await _fetch_img(client, random.choice(res)["urls"]["regular"])
+    return (img, "unsplash") if img else None
 
 
 async def _pixabay(client, key):
@@ -417,7 +419,8 @@ async def _pixabay(client, key):
     hits = r.json().get("hits") or []
     if not hits:
         return None
-    return await _fetch_img(client, random.choice(hits)["largeImageURL"])
+    img = await _fetch_img(client, random.choice(hits)["largeImageURL"])
+    return (img, "pixabay") if img else None
 
 
 async def _openverse(client):
@@ -430,24 +433,25 @@ async def _openverse(client):
     res = r.json().get("results") or []
     if not res:
         return None
-    return await _fetch_img(client, random.choice(res)["url"])
+    img = await _fetch_img(client, random.choice(res)["url"])
+    return (img, "openverse") if img else None
 
 
-async def _picsum(client) -> bytes:
+async def _picsum(client) -> tuple:
     seed = random.randint(0, 99999)
     r = await client.get(
         f"https://picsum.photos/seed/{seed}/{CANVAS_W}/{CANVAS_H}",
         timeout=25, follow_redirects=True,
     )
     r.raise_for_status()
-    return r.content
+    return (r.content, "picsum")
 
 
 async def fetch_background(*, pexels_key=None, unsplash_key=None,
-                           pixabay_key=None) -> bytes:
-    """Multi-source fallback chain. Keyed sources (if configured) + Openverse
-    are shuffled for variety; Picsum is always the guaranteed last resort — so
-    the bot keeps producing memes even with zero API keys."""
+                           pixabay_key=None) -> tuple:
+    """Multi-source fallback chain → (image_bytes, source_name). Keyed sources
+    (if configured) + Openverse are shuffled for variety; Picsum is always the
+    guaranteed last resort, so generation works with zero API keys."""
     async with httpx.AsyncClient(
         timeout=25, follow_redirects=True,
         headers={"User-Agent": "tg_w40k/1.0"},
@@ -463,11 +467,11 @@ async def fetch_background(*, pexels_key=None, unsplash_key=None,
         random.shuffle(sources)
         for src in sources:
             try:
-                img = await src()
+                got = await src()
             except Exception:
-                img = None
-            if img:
-                return img
+                got = None
+            if got:
+                return got
         return await _picsum(client)
 
 
@@ -522,13 +526,13 @@ async def generate_meme(bank: list[Entry] | None = None,
     else:
         entry = _bias_pick(bank, lambda e: e.id, entry_avg)
     style = style or pick_style(layout_avg=layout_avg)
-    img = await fetch_background(pexels_key=pexels_key, unsplash_key=unsplash_key,
-                                 pixabay_key=pixabay_key)
+    img, img_source = await fetch_background(pexels_key=pexels_key, unsplash_key=unsplash_key,
+                                             pixabay_key=pixabay_key)
     png = render_meme(img, entry, style)
     return {
         "image": png, "entry_id": entry.id, "quote": entry.quote,
         "punchline": entry.punchline, "source": entry.source,
-        "layout": style.layout, "tone": entry.tone,
+        "layout": style.layout, "tone": entry.tone, "img_source": img_source,
     }
 
 
@@ -539,7 +543,7 @@ if __name__ == "__main__":
         e = next(x for x in bank if x.id == "woolf-room")
         for ly in layouts:
             st = pick_style(ly)
-            img = await fetch_background()
+            img, _src = await fetch_background()
             data = render_meme(img, e, st)
             p = Path("/tmp") / f"meme-demo-{ly}.jpg"
             p.write_bytes(data)
