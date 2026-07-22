@@ -385,7 +385,8 @@ async def _gen_meme(entry_id: str | None = None):
 
 
 def _meme_caption(res: dict) -> str:
-    return (f"стиль: <b>{res['layout']}</b> · фон: {res.get('img_source','?')} · "
+    fx = f" · 🎞{res['effect']}" if res.get("effect") else ""
+    return (f"стиль: <b>{res['layout']}</b>{fx} · фон: {res.get('img_source','?')} · "
             f"{res['source']} · [{res['tone']}] · {res['quote'][:40]}…")
 
 

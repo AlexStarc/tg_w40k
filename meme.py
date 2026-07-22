@@ -26,7 +26,7 @@ CACHE_DIR = HERE / "memes_cache"
 CACHE_KEEP = 50
 
 CANVAS_W, CANVAS_H = 1080, 1350
-MARGIN = 96
+MARGIN = 80
 
 # --- bundled OFL fonts (Cyrillic). spec = (path, variation-name-or-None) ---
 def _fp(name: str) -> str:
@@ -85,6 +85,7 @@ class Style:
     quote_size: int = 40
     punch_size: int = 70
     accent: tuple = field(default_factory=lambda: (0, 0, 0))
+    effect: str | None = None
 
 
 # ----------------------------------------------------------------- helpers
@@ -197,27 +198,27 @@ def pick_style(force_layout: str | None = None, layout_avg: dict | None = None) 
     if layout == "hand":
         return Style("hand", random.choice(HAND), random.choice(HAND),
                      WHITE, CREAM, quote_stroke=2, punch_stroke=3,
-                     quote_size=38, punch_size=66, accent=(60, 30, 40))
+                     quote_size=46, punch_size=66, accent=(60, 30, 40))
     if layout == "bars":
         return Style("bars", random.choice(SERIFS), random.choice(SANS),
                      WHITE, WHITE, quote_stroke=0, punch_stroke=2,
-                     quote_size=38, punch_size=72)
+                     quote_size=50, punch_size=72)
     if layout == "poster":
         return Style("poster", random.choice(SERIFS), random.choice(SANS),
                      CREAM, WHITE, quote_stroke=1, punch_stroke=3,
-                     quote_size=42, punch_size=80)
+                     quote_size=56, punch_size=80)
     if layout == "split":
         return Style("split", random.choice(SERIFS), random.choice(SANS),
                      CREAM, WHITE, quote_stroke=1, punch_stroke=2,
-                     quote_size=40, punch_size=68)
+                     quote_size=52, punch_size=68)
     if layout == "minimal":
         return Style("minimal", random.choice(SERIFS), random.choice(SANS),
                      CREAM, WHITE, quote_stroke=2, punch_stroke=3,
-                     quote_size=38, punch_size=74)
+                     quote_size=52, punch_size=74)
     # bottom (default)
     return Style("bottom", random.choice(SERIFS), random.choice(SANS),
                  CREAM, WHITE, quote_stroke=1, punch_stroke=2,
-                 quote_size=42, punch_size=72)
+                 quote_size=56, punch_size=72)
 
 
 # ----------------------------------------------------------------- layouts
@@ -226,7 +227,7 @@ def _place_bottom(base, e, s):
     d = ImageDraw.Draw(base, "RGBA")
     mw = CANVAS_W - 2 * MARGIN
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 3, s.punch_size, 44)
-    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 3, s.quote_size, 28)
+    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 3, s.quote_size, 36)
     plh = pf.getbbox("Ag")[3] + 14
     qlh = qf.getbbox("Ag")[3] + 14
     p_bottom = CANVAS_H - 96
@@ -248,7 +249,7 @@ def _place_bars(base, e, s):
     d.rectangle([0, 0, CANVAS_W, top_bar], fill=(0, 0, 0, 238))
     d.rectangle([0, CANVAS_H - bot_bar, CANVAS_W, CANVAS_H], fill=(0, 0, 0, 245))
     mw = CANVAS_W - 2 * MARGIN
-    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 26)
+    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 36)
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 2, s.punch_size + 4, 48)
     qlh = qf.getbbox("Ag")[3] + 12
     plh = pf.getbbox("Ag")[3] + 14
@@ -262,7 +263,7 @@ def _place_poster(base, e, s):
     base = Image.alpha_composite(base, _vgrad(0.0, 165))
     d = ImageDraw.Draw(base, "RGBA")
     mw = CANVAS_W - 2 * MARGIN
-    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 3, s.quote_size, 28)
+    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 3, s.quote_size, 36)
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 3, s.punch_size, 52)
     qlh = qf.getbbox("Ag")[3] + 14
     plh = pf.getbbox("Ag")[3] + 16
@@ -278,7 +279,7 @@ def _place_split(base, e, s):
     base = Image.alpha_composite(base, _vgrad(0.62, 200))                # bottom dark
     d = ImageDraw.Draw(base, "RGBA")
     mw = CANVAS_W - 2 * MARGIN
-    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 26)
+    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 36)
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 2, s.punch_size, 46)
     qlh = qf.getbbox("Ag")[3] + 12
     plh = pf.getbbox("Ag")[3] + 14
@@ -295,7 +296,7 @@ def _place_minimal(base, e, s):
     base = Image.alpha_composite(blur, dark)
     d = ImageDraw.Draw(base, "RGBA")
     mw = CANVAS_W - 2 * MARGIN
-    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 26)
+    qf, ql, _ = _fit(f"«{e.quote}»", s.quote_font, mw, 2, s.quote_size, 36)
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 3, s.punch_size, 48)
     qlh = qf.getbbox("Ag")[3] + 12
     plh = pf.getbbox("Ag")[3] + 16
@@ -311,7 +312,7 @@ def _place_hand(base, e, s):
     d = ImageDraw.Draw(base, "RGBA")
     d.rectangle([0, 0, CANVAS_W, CANVAS_H], fill=(0, 0, 0, 70))
     mw = CANVAS_W - 2 * MARGIN
-    qf, ql, _ = _fit(e.quote, s.quote_font, mw, 2, s.quote_size, 26)
+    qf, ql, _ = _fit(e.quote, s.quote_font, mw, 2, s.quote_size, 34)
     pf, pl, _ = _fit(e.punchline, s.punch_font, mw, 3, s.punch_size, 44)
     qlh = qf.getbbox("Ag")[3] + 14
     plh = pf.getbbox("Ag")[3] + 16
@@ -336,9 +337,57 @@ LAYOUT_FN = {
 }
 
 
+# ----------------------------------------------------------------- niche effects
+# Applied occasionally (~1 in 5 memes) to the photo before text. All fast in Pillow.
+def _fx_gray(im):
+    return im.convert("L").convert("RGBA")
+
+
+def _fx_cold(im):
+    g = im.convert("L")
+    r = g.point(lambda x: int(x * 0.72))
+    gg = g.point(lambda x: int(x * 0.88))
+    b = g.point(lambda x: min(255, int(x * 1.18)))
+    return Image.merge("RGBA", (r, gg, b, im.getchannel("A")))
+
+
+def _fx_sepia(im):
+    g = im.convert("L")
+    r = g.point(lambda x: min(255, int(x * 1.08)))
+    gg = g.point(lambda x: int(x * 0.9))
+    b = g.point(lambda x: int(x * 0.68))
+    return Image.merge("RGBA", (r, gg, b, im.getchannel("A")))
+
+
+def _fx_blur(im):
+    return im.filter(ImageFilter.GaussianBlur(4))
+
+
+def _fx_grain(im):
+    noise = Image.effect_noise(im.size, 28)
+    layer = Image.merge("RGBA", (noise, noise, noise, Image.new("L", im.size, 45)))
+    return Image.alpha_composite(im, layer)
+
+
+def _fx_noir(im):
+    g = im.convert("L").point(lambda x: 255 if x > 150 else (0 if x < 70 else x))
+    return g.convert("RGBA")
+
+
+EFFECTS = {"gray": _fx_gray, "cold": _fx_cold, "sepia": _fx_sepia,
+           "blur": _fx_blur, "grain": _fx_grain, "noir": _fx_noir}
+
+
+def _apply_effect(im, name: str | None) -> Image.Image:
+    fn = EFFECTS.get(name or "")
+    return fn(im) if fn else im
+
+
 def render_meme(image_bytes: bytes, entry: Entry, style: Style | None = None) -> bytes:
     style = style or pick_style()
     im = _cover(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
+    if style.effect:
+        im = _apply_effect(im, style.effect)
     out = LAYOUT_FN[style.layout](im, entry, style)
     buf = io.BytesIO()
     out.save(buf, "JPEG", quality=88, optimize=True)   # JPEG: smaller TG payload
@@ -526,6 +575,8 @@ async def generate_meme(bank: list[Entry] | None = None,
     else:
         entry = _bias_pick(bank, lambda e: e.id, entry_avg)
     style = style or pick_style(layout_avg=layout_avg)
+    if not style.effect and random.random() < 0.22:
+        style.effect = random.choice(list(EFFECTS))
     img, img_source = await fetch_background(pexels_key=pexels_key, unsplash_key=unsplash_key,
                                              pixabay_key=pixabay_key)
     png = render_meme(img, entry, style)
@@ -533,6 +584,7 @@ async def generate_meme(bank: list[Entry] | None = None,
         "image": png, "entry_id": entry.id, "quote": entry.quote,
         "punchline": entry.punchline, "source": entry.source,
         "layout": style.layout, "tone": entry.tone, "img_source": img_source,
+        "effect": style.effect,
     }
 
 
