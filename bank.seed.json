@@ -214,5 +214,53 @@
     "punchline": "Новая возможность снова ничего не сделать",
     "tone": "dark",
     "themes": ["прокрастинация", "экзистенция"]
+  },
+  {
+    "id": "wh-emperor-protects",
+    "source": "Warhammer 40K",
+    "quote": "Император защищает",
+    "punchline": "А от банковского приложения в два ночи — нет",
+    "tone": "dark",
+    "themes": ["защита", "быт"]
+  },
+  {
+    "id": "wh-while-we-breathe",
+    "source": "Warhammer 40K",
+    "quote": "Пока мы дышим, мы стоим",
+    "punchline": "Пока мы дышим, мы стоим. Дышу через раз. Стою плохо",
+    "tone": "dark",
+    "themes": ["усталость", "стойкость"]
+  },
+  {
+    "id": "wh-only-in-death",
+    "source": "Warhammer 40K",
+    "quote": "Только в смерти долг завершён",
+    "punchline": "А до смерти — ипотека и три подписки",
+    "tone": "dark",
+    "themes": ["долг", "деньги"]
+  },
+  {
+    "id": "wh-bolter-loaded",
+    "source": "Warhammer 40K",
+    "quote": "Молись Императору, но держи болтер заряженным",
+    "punchline": "Молись, но телефон держи заряженным. Телефон важнее",
+    "tone": "light",
+    "themes": ["технологии", "быт"]
+  },
+  {
+    "id": "wh-no-step-back",
+    "source": "Warhammer 40K",
+    "quote": "Ни шагу назад",
+    "punchline": "Ни шагу назад. Особенно из кровати в воскресенье",
+    "tone": "light",
+    "themes": ["утро", "упрямство"]
+  },
+  {
+    "id": "wh-faith-shield",
+    "source": "Warhammer 40K",
+    "quote": "Вера — наш щит",
+    "punchline": "Вера — наш щит. От налоговой, увы, не спасает",
+    "tone": "dark",
+    "themes": ["вера", "деньги"]
   }
 ]

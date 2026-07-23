@@ -60,6 +60,10 @@ BG_TAGS = [
     "grey sky", "empty bed", "kitchen night", "subway", "clouds",
     "abandoned", "dark forest", "ocean grey", "desert road", "empty cafe",
     "neon night", "snow", "old building", "tunnel", "wet asphalt",
+    # grimdark / WH40K-adjacent (real gothic photos, never AI/copyrighted art)
+    "gothic cathedral", "dark ruins", "gothic architecture", "dark monastery",
+    "stone castle fog", "storm lightning", "abandoned church",
+    "cathedral interior", "medieval ruins", "dark cloister",
 ]
 
 LAYOUTS = ["bottom", "bars", "poster", "split", "minimal", "hand"]
