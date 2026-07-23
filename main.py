@@ -515,6 +515,9 @@ async def cmd_meme_add(message: Message):
     quote, punch = parts[0], parts[1]
     tone = parts[2].strip().lower() if len(parts) > 2 and parts[2].strip() else "light"
     eid = meme_mod.append_entry(quote, punch, tone)
+    if not eid:
+        await message.answer("⚠️ Такая цитата (или очень похожая) уже есть в банке — не добавлено")
+        return
     await message.answer(f"✅ Добавлено в банк (<code>{eid}</code>):\n"
                          f"«{quote}» → {punch}")
 
@@ -582,30 +585,33 @@ async def refresh_meme_bank(n: int = 8) -> dict:
     pairs = _extract_pairs(raw)
     if not pairs:
         logger.warning("meme seed: no JSON parsed (%d chars). raw[:300]=%s", len(raw), raw[:300])
-    existing_lower = {e.quote.lower().strip() for e in bank}
     added = 0
+    skipped = 0
     for p in pairs:
         q = (p.get("quote") or "").strip().strip("«»\"'\"")
         punch = (p.get("punchline") or "").strip()
-        if not q or not punch or q.lower() in existing_lower:
+        if not q or not punch:
             continue
         tone = "dark" if str(p.get("tone", "")).lower().startswith("d") else "light"
         src = (p.get("source") or "").strip() or "—"
-        meme_mod.append_entry(q, punch, tone, source=src)
-        existing_lower.add(q.lower())
-        added += 1
+        eid = meme_mod.append_entry(q, punch, tone, source=src)
+        if eid:
+            added += 1
+        else:
+            skipped += 1
     meme_mod.cap_bank()
-    return {"added": added, "received": len(pairs), "raw_len": len(raw),
-            "sample": pairs[0] if pairs else None}
+    return {"added": added, "received": len(pairs), "skipped": skipped,
+            "raw_len": len(raw), "sample": pairs[0] if pairs else None}
 
 
 async def daily_refresh_bank():
     try:
         res = await refresh_meme_bank(8)
-        logger.info("meme bank refreshed: +%d (received %d)", res["added"], res["received"])
+        logger.info("meme bank refreshed: +%d (received %d, skipped %d)",
+                    res["added"], res["received"], res["skipped"])
         await bot.send_message(
             ADMIN_ID,
-            f"➕ Банк мемов пополнен: +{res['added']} цитат (GLM вернул {res['received']})",
+            f"➕ Банк мемов: +{res['added']} цитат (GLM вернул {res['received']}, дубли пропущены {res['skipped']})",
         )
     except Exception:
         logger.exception("meme bank refresh failed")
@@ -627,12 +633,13 @@ async def cmd_meme_seed(message: Message):
         res = await refresh_meme_bank(n)
         await status.delete()
         if res["added"]:
+            dup = f", {res['skipped']} дублей пропущено" if res["skipped"] else ""
             await message.answer(
-                f"✅ Добавлено {res['added']} цитат (GLM вернул {res['received']} пар)")
+                f"✅ Добавлено {res['added']} цитат (GLM вернул {res['received']} пар{dup})")
         else:
             tail = ""
             if res["received"]:
-                tail = f" — но все дубли/пустые"
+                tail = f" — но все {res['skipped']} дубли/пустые" if res["skipped"] else " — но все пустые"
             else:
                 tail = f" — GLM не вернул разборный JSON ({res['raw_len']} симв). Подробности в журнале."
             await message.answer(f"⚠️ Не добавлено ни одной (получено {res['received']}){tail}")

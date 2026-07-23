@@ -6,6 +6,7 @@ No author attribution is ever rendered.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import io
 import json
@@ -544,12 +545,42 @@ def load_bank() -> list[Entry]:
     return [Entry(**{k: v for k, v in e.items() if k in keep}) for e in raw]
 
 
+def _norm_quote(q: str) -> str:
+    """Aggressive normalization for duplicate detection: lowercase, strip
+    quotes/punctuation/dashes, collapse whitespace."""
+    q = q.lower()
+    for ch in "«»\"'`.,!?;:—–-…()[]…":
+        q = q.replace(ch, " ")
+    return " ".join(q.split())
+
+
+def quote_is_duplicate(quote: str, existing: list, threshold: float = 0.86) -> bool:
+    """True if `quote` matches an existing one (normalized) or is a near-
+    paraphrase (SequenceMatcher ratio >= threshold). `existing` = list of
+    quote strings (raw)."""
+    nq = _norm_quote(quote)
+    if not nq:
+        return False
+    for ex in existing:
+        n_ex = _norm_quote(ex or "")
+        if not n_ex:
+            continue
+        if nq == n_ex or difflib.SequenceMatcher(None, nq, n_ex).ratio() >= threshold:
+            return True
+    return False
+
+
 def append_entry(quote: str, punchline: str, tone: str = "light",
-                 source: str = "—") -> str:
+                 source: str = "—") -> str | None:
+    """Append a pair to the live bank. Returns the new id, or None if the quote
+    is an exact or near-duplicate of one already present (normalized match)."""
     raw = json.loads(BANK_PATH.read_text(encoding="utf-8"))
+    existing_quotes = [e.get("quote", "") for e in raw]
+    if quote_is_duplicate(quote, existing_quotes):
+        return None
     eid = "u" + hashlib.md5((quote + punchline).encode("utf-8")).hexdigest()[:8]
     if any(e.get("id") == eid for e in raw):
-        return eid
+        return None
     raw.append({"id": eid, "source": source, "quote": quote,
                 "punchline": punchline, "tone": tone, "themes": []})
     BANK_PATH.write_text(json.dumps(raw, ensure_ascii=False, indent=2),
