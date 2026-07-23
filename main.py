@@ -25,8 +25,8 @@ from config import (
     PEXELS_API_KEY,
     UNSPLASH_API_KEY,
     PIXABAY_API_KEY,
-    PRIMARY_MODEL,
     MAX_TOKENS,
+    MEME_MODEL,
 )
 from database import (
     init_db,
@@ -555,7 +555,7 @@ async def refresh_meme_bank(n: int = 8) -> dict:
     ex_block = "\n".join(f'- «{e.quote}» → {e.punchline} [{e.tone}]' for e in examples)
     existing = "; ".join(e.quote for e in bank)[:1500]
     payload = {
-        "model": PRIMARY_MODEL,
+        "model": MEME_MODEL,
         "messages": [
             {"role": "system", "content": MEME_SEED_SYSTEM},
             {"role": "user", "content": (
@@ -590,7 +590,8 @@ async def refresh_meme_bank(n: int = 8) -> dict:
         if not q or not punch or q.lower() in existing_lower:
             continue
         tone = "dark" if str(p.get("tone", "")).lower().startswith("d") else "light"
-        meme_mod.append_entry(q, punch, tone)
+        src = (p.get("source") or "").strip() or "—"
+        meme_mod.append_entry(q, punch, tone, source=src)
         existing_lower.add(q.lower())
         added += 1
     meme_mod.cap_bank()
