@@ -782,6 +782,7 @@ async def daily_summarize(target_date: str = None) -> bool:
 async def main():
     await init_db()
     await migrate_db()
+    meme_mod.ensure_bank()
     logger.info("DB initialized and migrated")
 
     bot_token = os.getenv("BOT_TOKEN")

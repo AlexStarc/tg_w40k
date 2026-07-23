@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = Path(__file__).parent
 BANK_PATH = HERE / "bank.json"
+SEED_PATH = HERE / "bank.seed.json"
 FONTS_DIR = HERE / "fonts"
 # small rotating on-disk cache of generated memes (history/inspection only,
 # gitignored; publishing is file_id-based and does not depend on it)
@@ -525,7 +526,15 @@ async def fetch_background(*, pexels_key=None, unsplash_key=None,
 
 
 # ----------------------------------------------------------------- bank
+def ensure_bank():
+    """Bootstrap: if the live bank is missing, seed it from the tracked
+    curated baseline (bank.seed.json). No-op once bank.json exists."""
+    if not BANK_PATH.exists() and SEED_PATH.exists():
+        BANK_PATH.write_bytes(SEED_PATH.read_bytes())
+
+
 def load_bank() -> list[Entry]:
+    ensure_bank()
     raw = json.loads(BANK_PATH.read_text(encoding="utf-8"))
     keep = Entry.__dataclass_fields__
     return [Entry(**{k: v for k, v in e.items() if k in keep}) for e in raw]

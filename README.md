@@ -83,7 +83,9 @@ the result to the admin for review before publishing to the configured channel.
    quotes are dropped, well-rated quotes and styles are picked more often, while a
    20% exploration rate keeps the pool from collapsing
 4. New material enters `bank.json` via `/meme_add` (or by hand); the file is plain
-   JSON, so it can be edited or re-seeded freely
+   JSON, so it can be edited or re-seeded freely. `bank.json` is gitignored (it
+   mutates at runtime like `bot.db`); the curated baseline lives in the tracked
+   `bank.seed.json`, and the bot auto-seeds `bank.json` from it on first run.
 5. The bank also **auto-refreshes**: a scheduled GLM job (04:00 MSK, alongside the
    daily chronicle cycle) generates ~8 new pairs and appends them (deduped). Growth
    is capped (oldest auto-pairs pruned beyond 120). Since freshly-added pairs start
