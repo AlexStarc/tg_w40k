@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, InputMediaPhoto
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, InputMediaPhoto, BotCommand, BotCommandScopeChat
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -66,6 +66,34 @@ logger = logging.getLogger(__name__)
 
 bot: Bot = None  # type: ignore[assignment]
 dp = Dispatcher()
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer(
+        "📜 <b>Летописи</b>\n"
+        "/summary — последняя летопись\n"
+        "/send_to_chat — отправить последнюю в чат\n"
+        "/run_summary — сгенерировать сейчас\n"
+        "/regenerate <i>YYYY-MM-DD</i> — перегенерировать (по умолч. вчера)\n"
+        "/rate <i>1-5</i> <i>[коммент]</i> — оценить последнюю\n"
+        "/history — список последних летописей\n"
+        "/stats — статистика\n\n"
+        "🎭 <b>Данные и промпты</b>\n"
+        "/characters — справочник персонажей\n"
+        "/character <i>user титул</i> — задать титул\n"
+        "/set_prompt <i>[текст|reset]</i> — кастомный промпт летописца\n"
+        "/fix_fragments — починить нумерацию фрагментов\n"
+        "/cleanup — удалить сообщения за вчера\n"
+        "/purge — удалить всё старше 14 дней\n\n"
+        "🎨 <b>Мемы (Crisiswoman)</b>\n"
+        "/meme — сгенерить мём на ревью (кнопки: опубликовать/стиль/цитата/⭐/❌)\n"
+        "/meme_add <i>цитата :: панчлайн :: dark</i> — добавить пару в банк\n"
+        "/meme_seed <i>[N]</i> — освежить банк через GLM\n\n"
+        "<i>Авто: летопись в 00:05 МСК, освежение банка мемов в 04:00.</i>"
+    )
 
 
 @dp.message(Command("summary"))
@@ -829,6 +857,21 @@ async def main():
         session=session,
     )
     logger.info("Bot initialized%s", f" with proxy: {proxies_to_try[0]}" if session else " without proxy")
+
+    await bot.set_my_commands(
+        [BotCommand(command=c, description=d) for c, d in (
+            ("help", "список команд"),
+            ("summary", "последняя летопись"),
+            ("send_to_chat", "отправить летопись в чат"),
+            ("run_summary", "сгенерировать сейчас"),
+            ("regenerate", "перегенерировать за дату"),
+            ("rate", "оценить летопись 1-5"),
+            ("meme", "сгенерить мём на ревью"),
+            ("meme_add", "добавить цитату в банк"),
+            ("meme_seed", "освежить банк через GLM"),
+        )],
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+    )
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
