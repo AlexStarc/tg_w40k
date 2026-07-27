@@ -6,3 +6,4 @@ httpx
 tenacity
 aiohttp-socks
 pillow
+telethon

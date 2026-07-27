@@ -16,6 +16,19 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 UNSPLASH_API_KEY = os.getenv("UNSPLASH_API_KEY")
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 
+# Telethon user-session for reading source channels (optional).
+# Run `python auth_telethon.py` once to create the .session file.
+TG_API_ID = os.getenv("TG_API_ID")
+TG_API_HASH = os.getenv("TG_API_HASH")
+TG_SESSION = os.getenv("TG_SESSION", "tg_w40k_user")
+MEME_SOURCE_CHANNELS = [
+    c.strip() for c in os.getenv("MEME_SOURCE_CHANNELS", "").split(",") if c.strip()
+]
+try:
+    MEME_HARVEST_PER_CHANNEL = int(os.getenv("MEME_HARVEST_PER_CHANNEL", "3"))
+except ValueError:
+    MEME_HARVEST_PER_CHANNEL = 3
+
 TG_PROXIES = [
     "socks5://93.90.231.101:1080",
     "socks5://184.178.172.18:15280",

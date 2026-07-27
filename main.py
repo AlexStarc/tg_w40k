@@ -27,6 +27,8 @@ from config import (
     PIXABAY_API_KEY,
     MAX_TOKENS,
     MEME_MODEL,
+    MEME_SOURCE_CHANNELS,
+    MEME_HARVEST_PER_CHANNEL,
 )
 from database import (
     init_db,
@@ -49,14 +51,20 @@ from database import (
     delete_setting,
     save_meme_rating,
     get_meme_bias,
+    get_channel_state,
+    save_channel_posts,
+    get_channel_posts,
+    count_channel_posts,
+    get_channels_state,
 )
 import database as database_mod
 from summarizer import summarize, generate_character_titles, _fix_fragment_number, _call_glm
 import meme as meme_mod
+import channel_sources
 import json as _json
 import random as _random
 import re as _re
-from prompts import MEME_SEED_SYSTEM
+from prompts import MEME_SEED_SYSTEM, MEME_HARVEST_SYSTEM, MEME_STYLE_FEWSHOT
 
 logging.basicConfig(
     level=logging.INFO,
@@ -577,23 +585,41 @@ def _extract_pairs(raw: str) -> list:
     return []
 
 
-async def refresh_meme_bank(n: int = 8) -> dict:
+async def refresh_meme_bank(n: int = 8, with_channels: bool = True) -> dict:
     """Generate n new quote+punchline pairs via GLM and append (deduped) to
     bank.json. Quality is policed downstream by the rating→bias feedback loop:
-    weak pairs get low ratings and stop appearing."""
+    weak pairs get low ratings and stop appearing.
+
+    When `with_channels` is True and Telethon is configured, a small random
+    sample of captions harvested from source channels is prepended to the
+    user prompt as style orientation (few-shot)."""
     bank = meme_mod.load_bank()
     examples = _random.sample(bank, min(6, len(bank)))
     ex_block = "\n".join(f'- «{e.quote}» → {e.punchline} [{e.tone}]' for e in examples)
     existing = "; ".join(e.quote for e in bank)[:1500]
+
+    fewshot_block = ""
+    if with_channels and channel_sources.is_configured() and MEME_SOURCE_CHANNELS:
+        try:
+            sample = await get_channel_posts(limit=10)
+            if sample:
+                lines = [f"- [{ch}] {text.strip()[:300]}" for ch, text in sample if text]
+                if lines:
+                    fewshot_block = MEME_STYLE_FEWSHOT + "\n".join(lines) + "\n\n"
+        except Exception:
+            logger.exception("few-shot fetch failed; continuing without")
+
+    user_content = (
+        f"{fewshot_block}"
+        f"Примеры стиля:\n{ex_block}\n\n"
+        f"Уже есть (не повторяй): {existing}\n\n"
+        f"Придумай {n} НОВЫх пар. Ответ — СТРОГО JSON-массив, без markdown и пояснений."
+    )
     payload = {
         "model": MEME_MODEL,
         "messages": [
             {"role": "system", "content": MEME_SEED_SYSTEM},
-            {"role": "user", "content": (
-                f"Примеры стиля:\n{ex_block}\n\n"
-                f"Уже есть (не повторяй): {existing}\n\n"
-                f"Придумай {n} НОВЫх пар. Ответ — СТРОГО JSON-массив, без markdown и пояснений."
-            )},
+            {"role": "user", "content": user_content},
         ],
         "max_tokens": MAX_TOKENS,
         "temperature": 0.9,
@@ -629,14 +655,107 @@ async def refresh_meme_bank(n: int = 8) -> dict:
             skipped += 1
     meme_mod.cap_bank()
     return {"added": added, "received": len(pairs), "skipped": skipped,
-            "raw_len": len(raw), "sample": pairs[0] if pairs else None}
+            "raw_len": len(raw), "sample": pairs[0] if pairs else None,
+            "fewshot": bool(fewshot_block)}
+
+
+async def _extract_pairs_from_posts(channel: str, posts: list, n: int) -> int:
+    """GLM-extract up to n punchline-pairs from raw channel captions and
+    append them to bank.json with source = channel handle. Returns the count
+    actually added (after dedup)."""
+    sample = posts if len(posts) <= 15 else _random.sample(posts, 15)
+    captions = "\n---\n".join((p.text or "").strip()[:600] for p in sample if (p.text or "").strip())
+    captions = captions[:6000]
+    if not captions.strip():
+        return 0
+    bank = meme_mod.load_bank()
+    existing = "; ".join(e.quote for e in bank)[:1500]
+    payload = {
+        "model": MEME_MODEL,
+        "messages": [
+            {"role": "system", "content": MEME_HARVEST_SYSTEM},
+            {"role": "user", "content": (
+                f"Подписи постов канала {channel}:\n\n{captions}\n\n"
+                f"Уже есть (не повторяй): {existing}\n\n"
+                f"Извлеки до {n} пар. Ответ — СТРОГО JSON-массив."
+            )},
+        ],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.85,
+    }
+    try:
+        result = await _call_glm(payload)
+    except Exception:
+        logger.exception("harvest GLM call failed for %s", channel)
+        return 0
+    raw = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    pairs = _extract_pairs(raw)
+    added = 0
+    for p in pairs:
+        q = (p.get("quote") or "").strip().strip("«»\"'\"")
+        punch = (p.get("punchline") or "").strip()
+        if not q or not punch:
+            continue
+        tone = "dark" if str(p.get("tone", "")).lower().startswith("d") else "light"
+        eid = meme_mod.append_entry(q, punch, tone, source=channel)
+        if eid:
+            added += 1
+    return added
+
+
+async def harvest_channels(channels: list[str] | None = None,
+                           per_channel: int | None = None) -> dict:
+    """For each source channel: pull new captions via Telethon → cache in DB
+    → extract N punchline-pairs via GLM → append to bank.json with
+    source=channel handle. Returns aggregate stats.
+
+    `channels` defaults to config.MEME_SOURCE_CHANNELS, `per_channel` to
+    config.MEME_HARVEST_PER_CHANNEL. No-op (returns skipped marker) if
+    Telethon is not configured or no channels are set."""
+    if not channel_sources.is_configured():
+        return {"skipped": "not_configured", "channels": [], "added": 0}
+    chans = channels if channels is not None else MEME_SOURCE_CHANNELS
+    per = per_channel if per_channel is not None else MEME_HARVEST_PER_CHANNEL
+    if not chans:
+        return {"skipped": "no_channels", "channels": [], "added": 0}
+    total_added = 0
+    per_chan = []
+    for ch in chans:
+        last = await get_channel_state(ch)
+        posts = await channel_sources.fetch_since(ch, last, limit=80)
+        if not posts:
+            per_chan.append({"channel": ch, "fetched": 0, "new_cached": 0, "added": 0})
+            continue
+        rows = [(p.tg_id, p.text) for p in posts]
+        try:
+            new_cached = await save_channel_posts(ch, rows)
+        except Exception:
+            logger.exception("save_channel_posts failed for %s", ch)
+            new_cached = 0
+        added = await _extract_pairs_from_posts(ch, posts, per)
+        per_chan.append({"channel": ch, "fetched": len(posts),
+                         "new_cached": new_cached, "added": added})
+        total_added += added
+    meme_mod.cap_bank()
+    return {"channels": per_chan, "added": total_added}
 
 
 async def daily_refresh_bank():
     try:
+        if channel_sources.is_configured() and MEME_SOURCE_CHANNELS:
+            try:
+                h = await harvest_channels()
+                logger.info("harvest: %s", h)
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"📡 Харвест каналов: +{h['added']} цитат из {len(h['channels'])} каналов",
+                )
+            except Exception:
+                logger.exception("harvest in daily refresh failed")
+                await bot.send_message(ADMIN_ID, "⚠️ Харвест каналов упал — см. журнал")
         res = await refresh_meme_bank(8)
-        logger.info("meme bank refreshed: +%d (received %d, skipped %d)",
-                    res["added"], res["received"], res["skipped"])
+        logger.info("meme bank refreshed: +%d (received %d, skipped %d, fewshot=%s)",
+                    res["added"], res["received"], res["skipped"], res["fewshot"])
         await bot.send_message(
             ADMIN_ID,
             f"➕ Банк мемов: +{res['added']} цитат (GLM вернул {res['received']}, дубли пропущены {res['skipped']})",
@@ -674,6 +793,56 @@ async def cmd_meme_seed(message: Message):
     except Exception as e:
         logger.exception("meme_seed failed")
         await message.answer(f"❌ {e}")
+
+
+@dp.message(Command("meme_harvest"))
+async def cmd_meme_harvest(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not channel_sources.is_configured():
+        await message.answer("⚠️ Telethon не настроен. Задай <code>TG_API_ID</code>/<code>TG_API_HASH</code> в .env "
+                             "и выполни <code>python auth_telethon.py</code>.")
+        return
+    if not MEME_SOURCE_CHANNELS:
+        await message.answer("⚠️ <code>MEME_SOURCE_CHANNELS</code> пуст — добавь каналы в .env.")
+        return
+    status = await message.answer(f"📡 Собираю посты из {len(MEME_SOURCE_CHANNELS)} каналов…")
+    try:
+        res = await harvest_channels()
+        if res.get("skipped"):
+            await status.edit_text(f"⚠️ Пропущено: {res['skipped']}")
+            return
+        lines = [f"📡 Харвест завершён: +{res['added']} цитат"]
+        for s in res["channels"]:
+            lines.append(
+                f"  • {s['channel']}: fetched={s['fetched']}, new_cached={s['new_cached']}, +{s['added']}"
+            )
+        await status.edit_text("\n".join(lines))
+    except Exception as e:
+        logger.exception("meme_harvest failed")
+        try:
+            await status.edit_text(f"❌ {e}")
+        except Exception:
+            await message.answer(f"❌ {e}")
+
+
+@dp.message(Command("meme_channels"))
+async def cmd_meme_channels(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not MEME_SOURCE_CHANNELS:
+        await message.answer("ℹ️ Источники не заданы (<code>MEME_SOURCE_CHANNELS</code> пуст).")
+        return
+    flag = "✅" if channel_sources.is_configured() else "❌ (нет TG_API_ID/HASH или сессия не авторизована)"
+    counts = await count_channel_posts()
+    states = {s["channel"]: s for s in await get_channels_state()}
+    lines = [f"Каналов: {len(MEME_SOURCE_CHANNELS)}  Telethon: {flag}"]
+    for ch in MEME_SOURCE_CHANNELS:
+        c = counts.get(ch, 0)
+        st = states.get(ch)
+        last = st["last_fetch_at"] if st and st["last_fetch_at"] else "—"
+        lines.append(f"  • {ch}: {c} постов в кэше, last_fetch={last}")
+    await message.answer("\n".join(lines))
 
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
@@ -869,6 +1038,8 @@ async def main():
             ("meme", "сгенерить мём на ревью"),
             ("meme_add", "добавить цитату в банк"),
             ("meme_seed", "освежить банк через GLM"),
+            ("meme_harvest", "харвест цитат из каналов"),
+            ("meme_channels", "статус источников-каналов"),
         )],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID),
     )
@@ -908,6 +1079,7 @@ async def main():
         pass
     finally:
         scheduler.shutdown(wait=False)
+        await channel_sources.close_client()
         await bot.session.close()
         logger.info("Bot stopped.")
 
@@ -916,6 +1088,7 @@ async def _shutdown(scheduler):
     logger.info("Shutdown signal received")
     scheduler.shutdown(wait=False)
     await dp.stop_polling()
+    await channel_sources.close_client()
 
 
 if __name__ == "__main__":

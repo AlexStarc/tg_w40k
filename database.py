@@ -80,6 +80,24 @@ async def migrate_db():
             )
         """)
 
+        # source-channel harvest state + cached captions (few-shot corpus)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_state (
+                channel TEXT PRIMARY KEY,
+                last_tg_id INTEGER,
+                last_fetch_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_posts (
+                channel TEXT,
+                tg_id INTEGER,
+                text TEXT,
+                fetched_at TEXT,
+                PRIMARY KEY (channel, tg_id)
+            )
+        """)
+
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages(chat_id, date)"
         )
@@ -307,3 +325,94 @@ async def get_meme_bias() -> dict:
         except aiosqlite.OperationalError:
             return {"entry": {}, "layout": {}}
     return {"entry": entry, "layout": layout}
+
+
+# --------------------------------------------------------------- source channels
+async def get_channel_state(channel: str) -> int | None:
+    """Last seen tg_id for incremental fetch, or None if never fetched."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT last_tg_id FROM channel_state WHERE channel = ?", (channel,)
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def get_channels_state() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT channel, last_tg_id, last_fetch_at "
+            "FROM channel_state ORDER BY channel"
+        )
+        rows = await cur.fetchall()
+    return [{"channel": r[0], "last_tg_id": r[1], "last_fetch_at": r[2]} for r in rows]
+
+
+async def save_channel_posts(channel: str, posts: list[tuple[int, str | None]]) -> int:
+    """Insert (tg_id, text) rows ignoring duplicates and bump channel_state to
+    the newest tg_id. Returns the number of new rows actually inserted."""
+    if not posts:
+        return 0
+    now = datetime.now(_MSK).isoformat(timespec="seconds")
+    text_rows = [(channel, tg_id, txt, now) for tg_id, txt in posts if txt]
+    if not text_rows:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        before = await (await db.execute(
+            "SELECT COUNT(*) FROM channel_posts WHERE channel = ?", (channel,)
+        )).fetchone()
+        await db.executemany(
+            "INSERT OR IGNORE INTO channel_posts (channel, tg_id, text, fetched_at) "
+            "VALUES (?, ?, ?, ?)",
+            text_rows,
+        )
+        last_id = max(tg_id for tg_id, _ in posts)
+        await db.execute(
+            "INSERT INTO channel_state (channel, last_tg_id, last_fetch_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(channel) DO UPDATE SET "
+            "  last_tg_id = excluded.last_tg_id, "
+            "  last_fetch_at = excluded.last_fetch_at",
+            (channel, last_id, now),
+        )
+        await db.commit()
+        after = await (await db.execute(
+            "SELECT COUNT(*) FROM channel_posts WHERE channel = ?", (channel,)
+        )).fetchone()
+        return max(0, after[0] - before[0])
+
+
+async def get_channel_posts(channel: str | None = None, limit: int = 50) -> list[tuple[str, str]]:
+    """Random sample of (channel, text) for few-shot style orientation. If
+    `channel` is None, samples across all channels."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if channel:
+            cur = await db.execute(
+                "SELECT channel, text FROM channel_posts "
+                "WHERE channel = ? AND text IS NOT NULL AND length(text) > 0 "
+                "ORDER BY RANDOM() LIMIT ?",
+                (channel, limit),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT channel, text FROM channel_posts "
+                "WHERE text IS NOT NULL AND length(text) > 0 "
+                "ORDER BY RANDOM() LIMIT ?",
+                (limit,),
+            )
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def count_channel_posts(channel: str | None = None) -> dict:
+    if channel:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM channel_posts WHERE channel = ?", (channel,)
+            )
+            return {channel: (await cur.fetchone())[0]}
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT channel, COUNT(*) FROM channel_posts "
+            "GROUP BY channel ORDER BY channel"
+        )
+        return {r[0]: r[1] for r in await cur.fetchall()}
