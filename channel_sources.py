@@ -4,25 +4,24 @@ A user-mode Telegram session (NOT the bot) is used so the bot can read any
 public channel the user is subscribed to. Run `auth_telethon.py` once to
 create the .session file; the bot uses it read-only afterwards.
 
-The module is optional: if TG_API_ID / TG_API_HASH are not set, is_configured()
-returns False and callers fall back to the existing GLM-only seed flow.
+The module degrades gracefully when telethon is not installed: is_configured()
+returns False and callers fall back to the existing GLM-only seed flow without
+crashing the bot on import.
 """
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError
-
 import config
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[TelegramClient] = None
+_client = None
 _lock = asyncio.Lock()
 
 
@@ -33,6 +32,20 @@ class Post:
     date: datetime
     text: Optional[str]
     has_media: bool
+
+
+def _has_telethon() -> bool:
+    try:
+        importlib.import_module("telethon")
+        return True
+    except ImportError:
+        return False
+
+
+def is_configured() -> bool:
+    """True only if BOTH env vars AND telethon are available. When this returns
+    False, callers fall back to the GLM-only seed flow without raising."""
+    return bool(config.TG_API_ID and config.TG_API_HASH) and _has_telethon()
 
 
 def _resolve(channel: str) -> str:
@@ -54,18 +67,21 @@ def _resolve(channel: str) -> str:
     return c
 
 
-def is_configured() -> bool:
-    return bool(config.TG_API_ID and config.TG_API_HASH)
-
-
-async def get_client() -> TelegramClient:
-    """Lazy singleton. Raises RuntimeError if not configured or if the session
-    is not authorized (run `python auth_telethon.py` to authorize)."""
+async def get_client():
+    """Lazy singleton. Raises RuntimeError if not configured, telethon is
+    missing, or the session is not authorized (run `python auth_telethon.py`)."""
     global _client
     if _client and _client.is_connected():
         return _client
-    if not is_configured():
+    if not (config.TG_API_ID and config.TG_API_HASH):
         raise RuntimeError("Telethon not configured: set TG_API_ID and TG_API_HASH")
+    try:
+        from telethon import TelegramClient
+    except ImportError as e:
+        raise RuntimeError(
+            "telethon is not installed. Run `pip install -r requirements.txt` "
+            "(or `pip install telethon`) to enable channel harvesting."
+        ) from e
     async with _lock:
         if _client and _client.is_connected():
             return _client
@@ -103,11 +119,15 @@ async def _iter_posts(target: str, limit: int, min_id: Optional[int]) -> list:
     if min_id is not None:
         kwargs["min_id"] = min_id
     try:
+        from telethon.errors import FloodWaitError
+    except ImportError:
+        FloodWaitError = ()  # type: ignore[assignment,misc]
+    try:
         out = []
         async for msg in client.iter_messages(target, **kwargs):
             out.append(msg)
         return out
-    except FloodWaitError as e:
+    except FloodWaitError as e:  # type: ignore[misc]
         wait = min(int(e.seconds) + 1, 60)
         logger.warning("FloodWait %ds on %s; backing off %ds", e.seconds, target, wait)
         await asyncio.sleep(wait)
@@ -134,12 +154,7 @@ async def fetch_recent(channel: str, limit: int = 50) -> list[Post]:
     """Fetch up to `limit` most recent text-bearing posts from a channel."""
     target = _resolve(channel)
     msgs = await _iter_posts(target, limit, None)
-    posts = []
-    for m in msgs:
-        p = _to_post(channel, m)
-        if p:
-            posts.append(p)
-    return posts
+    return [p for p in (_to_post(channel, m) for m in msgs) if p]
 
 
 async def fetch_since(channel: str, last_tg_id: Optional[int], limit: int = 100) -> list[Post]:
@@ -147,9 +162,4 @@ async def fetch_since(channel: str, last_tg_id: Optional[int], limit: int = 100)
     None, behaves like fetch_recent (initial backfill)."""
     target = _resolve(channel)
     msgs = await _iter_posts(target, limit, last_tg_id)
-    posts = []
-    for m in msgs:
-        p = _to_post(channel, m)
-        if p:
-            posts.append(p)
-    return posts
+    return [p for p in (_to_post(channel, m) for m in msgs) if p]
