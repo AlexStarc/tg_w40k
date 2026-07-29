@@ -42,6 +42,12 @@ TG_PROXIES = [
 # back to TG_PROXIES[0]. Format: 'socks5://host:port' or 'http://host:port'.
 TG_TELETHON_PROXY = os.getenv("TG_TELETHON_PROXY")
 
+# Telethon MTProto proxies (Telegram-native, only for Telethon — aiogram can't
+# use them). Format: 'host:port:secret' comma-separated. secret is a 32-char
+# hex or base64 string from the proxy provider. channel_sources tries them in
+# order before falling back to SOCKS/direct.
+TG_MTPROTO_PROXIES_RAW = os.getenv("TG_MTPROTO_PROXIES", "")
+
 _missing = []
 if not BOT_TOKEN:
     _missing.append("BOT_TOKEN")
@@ -110,3 +116,29 @@ def telethon_proxy_tuple(url: str | None) -> tuple | None:
         return (_SOCKS_TYPE[scheme], parsed.hostname, parsed.port)
     except Exception:
         return None
+
+
+def parse_mtproto_proxies(raw: str | None) -> list[tuple]:
+    """Parse 'host:port:secret[,host:port:secret...]' into a list of
+    (host, port, secret) tuples for Telethon MTProto. `host` may itself
+    contain ':' (IPv6) — the last two colon-separated tokens are port+secret."""
+    out: list[tuple] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split(":")
+        if len(parts) < 3:
+            continue
+        secret = parts[-1].strip()
+        try:
+            port = int(parts[-2])
+        except ValueError:
+            continue
+        host = ":".join(parts[:-2]).strip()
+        if host and port > 0 and secret:
+            out.append((host, port, secret))
+    return out
+
+
+TG_MTPROTO_PROXIES = parse_mtproto_proxies(TG_MTPROTO_PROXIES_RAW)

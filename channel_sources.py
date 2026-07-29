@@ -68,8 +68,10 @@ def _resolve(channel: str) -> str:
 
 
 async def get_client():
-    """Lazy singleton. Raises RuntimeError if not configured, telethon is
-    missing, or the session is not authorized (run `python auth_telethon.py`)."""
+    """Lazy singleton. Tries MTProto proxies (if configured) first, then the
+    SOCKS/HTTP proxy, then a direct connection — first working wins. Raises
+    RuntimeError if not configured, telethon is missing, or every connection
+    attempt fails (including an unauthorized session)."""
     global _client
     if _client and _client.is_connected():
         return _client
@@ -82,30 +84,46 @@ async def get_client():
             "telethon is not installed. Run `pip install -r requirements.txt` "
             "(or `pip install telethon[socks]`) to enable channel harvesting."
         ) from e
-    # Telethon proxy: explicit TG_TELETHON_PROXY wins, else first TG_PROXIES entry.
-    proxy_url = config.TG_TELETHON_PROXY or (config.TG_PROXIES[0] if config.TG_PROXIES else None)
-    proxy = config.telethon_proxy_tuple(proxy_url)
-    if proxy:
-        logger.info("Telethon using proxy: %s", proxy_url)
+
+    # Build ordered candidate list: MTProto entries, then SOCKS/HTTP, then direct.
+    candidates: list[tuple[str, object]] = []
+    for mt in config.TG_MTPROTO_PROXIES:
+        candidates.append(("mtproto", mt))
+    socks_url = config.TG_TELETHON_PROXY or (config.TG_PROXIES[0] if config.TG_PROXIES else None)
+    socks_tuple = config.telethon_proxy_tuple(socks_url)
+    if socks_tuple:
+        candidates.append(("socks", socks_tuple))
+    candidates.append(("direct", None))
+
     async with _lock:
         if _client and _client.is_connected():
             return _client
-        client = TelegramClient(
-            config.TG_SESSION,
-            int(config.TG_API_ID),  # type: ignore[arg-type]
-            config.TG_API_HASH,  # type: ignore[arg-type]
-            proxy=proxy,
+        last_err: Exception | None = None
+        for kind, proxy in candidates:
+            try:
+                client = TelegramClient(
+                    config.TG_SESSION,
+                    int(config.TG_API_ID),  # type: ignore[arg-type]
+                    config.TG_API_HASH,  # type: ignore[arg-type]
+                    proxy=proxy,
+                )
+                await client.connect()
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    raise RuntimeError(
+                        f"session '{config.TG_SESSION}' is not authorized. "
+                        "Run `python auth_telethon.py` once to log in."
+                    )
+                logger.info("Telethon connected via %s proxy: %r", kind, proxy)
+                _client = client
+                return _client
+            except Exception as e:
+                last_err = e
+                logger.warning("Telethon %s attempt failed (%s): %s", kind, proxy, e)
+        raise RuntimeError(
+            f"All Telethon connection attempts failed ({len(candidates)} tried). "
+            f"Last error: {last_err}"
         )
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            raise RuntimeError(
-                f"Telethon session '{config.TG_SESSION}' is not authorized. "
-                "Run `python auth_telethon.py` once to log in."
-            )
-        logger.info("Telethon client ready (session=%s, proxy=%s)", config.TG_SESSION, bool(proxy))
-        _client = client
-        return _client
 
 
 async def close_client() -> None:
