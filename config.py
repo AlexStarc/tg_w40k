@@ -30,11 +30,17 @@ except ValueError:
     MEME_HARVEST_PER_CHANNEL = 3
 
 TG_PROXIES = [
-    "socks5://93.90.231.101:1080",
-    "socks5://184.178.172.18:15280",
-    "socks5://192.252.214.20:15864",
-    "http://93.90.231.101:1080",
+    p.strip()
+    for p in os.getenv(
+        "TG_PROXIES",
+        "socks5://182.48.78.141:8008,socks5://72.195.34.35:27360,socks5://174.75.211.193:4145",
+    ).split(",")
+    if p.strip()
 ]
+
+# Telethon (channel harvest) proxy override. If unset, channel_sources falls
+# back to TG_PROXIES[0]. Format: 'socks5://host:port' or 'http://host:port'.
+TG_TELETHON_PROXY = os.getenv("TG_TELETHON_PROXY")
 
 _missing = []
 if not BOT_TOKEN:
@@ -82,3 +88,25 @@ TWO_PASS_ENABLED = True
 TOKEN_LIMIT_INPUT = 8000
 CHARS_PER_TOKEN = 4
 MESSAGES_PER_CHUNK = 60
+
+
+# PySocks / python_socks numeric constants (used by Telethon's `proxy=` arg):
+#   SOCKS4 = 1, SOCKS5 = 2, HTTP = 3
+_SOCKS_TYPE = {"socks4": 1, "socks5": 2, "socks5h": 2, "http": 3, "https": 3}
+
+
+def telethon_proxy_tuple(url: str | None) -> tuple | None:
+    """Parse 'socks5://host:port' / 'http://host:port' into the (type, host,
+    port) tuple Telethon expects (uses PySocks numeric constants). Returns
+    None if `url` is empty or unparseable."""
+    if not url:
+        return None
+    import urllib.parse as up
+    try:
+        parsed = up.urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in _SOCKS_TYPE or not parsed.hostname or not parsed.port:
+            return None
+        return (_SOCKS_TYPE[scheme], parsed.hostname, parsed.port)
+    except Exception:
+        return None

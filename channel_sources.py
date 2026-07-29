@@ -80,8 +80,13 @@ async def get_client():
     except ImportError as e:
         raise RuntimeError(
             "telethon is not installed. Run `pip install -r requirements.txt` "
-            "(or `pip install telethon`) to enable channel harvesting."
+            "(or `pip install telethon[socks]`) to enable channel harvesting."
         ) from e
+    # Telethon proxy: explicit TG_TELETHON_PROXY wins, else first TG_PROXIES entry.
+    proxy_url = config.TG_TELETHON_PROXY or (config.TG_PROXIES[0] if config.TG_PROXIES else None)
+    proxy = config.telethon_proxy_tuple(proxy_url)
+    if proxy:
+        logger.info("Telethon using proxy: %s", proxy_url)
     async with _lock:
         if _client and _client.is_connected():
             return _client
@@ -89,6 +94,7 @@ async def get_client():
             config.TG_SESSION,
             int(config.TG_API_ID),  # type: ignore[arg-type]
             config.TG_API_HASH,  # type: ignore[arg-type]
+            proxy=proxy,
         )
         await client.connect()
         if not await client.is_user_authorized():
@@ -97,7 +103,7 @@ async def get_client():
                 f"Telethon session '{config.TG_SESSION}' is not authorized. "
                 "Run `python auth_telethon.py` once to log in."
             )
-        logger.info("Telethon client ready (session=%s)", config.TG_SESSION)
+        logger.info("Telethon client ready (session=%s, proxy=%s)", config.TG_SESSION, bool(proxy))
         _client = client
         return _client
 
