@@ -68,6 +68,14 @@ except ValueError:
     PROXY_POOL_CONCURRENCY = 20
     PROXY_POOL_CACHE_TTL = 86400
 
+# Periodic session liveness probe (seconds). Every interval, the bot pings
+# get_me() through the current session; on failure it rotates to a fresh proxy
+# (TG_PROXIES first, then the remote pool) without restarting the process.
+try:
+    HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "1800"))
+except ValueError:
+    HEALTH_CHECK_INTERVAL = 1800
+
 _missing = []
 if not BOT_TOKEN:
     _missing.append("BOT_TOKEN")

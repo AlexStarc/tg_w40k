@@ -29,6 +29,7 @@ from config import (
     MEME_MODEL,
     MEME_SOURCE_CHANNELS,
     MEME_HARVEST_PER_CHANNEL,
+    HEALTH_CHECK_INTERVAL,
 )
 from database import (
     init_db,
@@ -985,6 +986,60 @@ async def daily_summarize(target_date: str = None) -> bool:
     return True
 
 
+async def _find_any_working_proxy() -> str | None:
+    """Try each TG_PROXIES in order, then fall back to the remote pool. Returns
+    a 'socks5://host:port' (or http://) URL, or None if nothing reaches Telegram."""
+    token = os.getenv("BOT_TOKEN")
+    for proxy_url in TG_PROXIES:
+        try:
+            test_session = AiohttpSession(proxy=proxy_url)
+            test_bot = Bot(token=token, session=test_session, request_timeout=10)
+            await test_bot.get_me()
+            await test_session.close()
+            return proxy_url
+        except Exception:
+            continue
+    try:
+        import proxy_pool
+        return await proxy_pool.find_working_proxy(TG_PROXIES)
+    except Exception:
+        logger.exception("proxy_pool lookup failed during health-check")
+        return None
+
+
+async def health_check_proxy():
+    """Periodic liveness probe. If bot.get_me() through the current session
+    fails, rotate to a fresh proxy (TG_PROXIES first, then the remote pool)
+    and rebind bot.session without restarting the process."""
+    global bot
+    if not bot:
+        return
+    try:
+        await bot.get_me()
+        return  # session is alive
+    except Exception as e:
+        logger.warning("health_check: current session failed (%s); rotating proxy", e)
+
+    try:
+        await bot.session.close()
+    except Exception:
+        logger.exception("health_check: failed to close old session")
+
+    new_proxy = await _find_any_working_proxy()
+    bot.session = AiohttpSession(proxy=new_proxy) if new_proxy else AiohttpSession()
+    if new_proxy:
+        logger.info("health_check: switched to proxy %s", new_proxy)
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🔄 health_check: переключил прокси на <code>{new_proxy}</code>",
+            )
+        except Exception:
+            logger.warning("health_check: couldn't deliver switch notification")
+    else:
+        logger.error("health_check: no working proxy found; session is now direct")
+
+
 async def main():
     await init_db()
     await migrate_db()
@@ -1079,6 +1134,14 @@ async def main():
         minute=0,
         misfire_grace_time=3600,
     )
+    if HEALTH_CHECK_INTERVAL > 0:
+        scheduler.add_job(
+            health_check_proxy,
+            "interval",
+            seconds=HEALTH_CHECK_INTERVAL,
+            misfire_grace_time=HEALTH_CHECK_INTERVAL,
+        )
+        logger.info("Health-check scheduled every %ds", HEALTH_CHECK_INTERVAL)
     scheduler.start()
 
     loop = asyncio.get_running_loop()
