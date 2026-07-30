@@ -26,6 +26,9 @@ data/
 bot.db
 bot_server.db
 
+# Downloaded socks5 proxy pool (re-fetched at runtime if missing)
+proxies_pool.txt
+
 # Generated meme artifacts (never commit — reproducible at runtime)
 memes_cache/
 # Live quote bank — mutated at runtime; seeded from bank.seed.json on first run

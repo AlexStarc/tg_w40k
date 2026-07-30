@@ -48,6 +48,26 @@ TG_TELETHON_PROXY = os.getenv("TG_TELETHON_PROXY")
 # order before falling back to SOCKS/direct.
 TG_MTPROTO_PROXIES_RAW = os.getenv("TG_MTPROTO_PROXIES", "")
 
+# Fallback SOCKS5 pool: when all TG_PROXIES fail at startup, the bot samples a
+# public socks5 list, tests PROXY_POOL_SAMPLE entries concurrently against
+# api.telegram.org, and uses the first that responds. Cached in DB across runs.
+PROXY_REMOTE_SOURCES = [
+    s.strip() for s in os.getenv(
+        "PROXY_REMOTE_SOURCES",
+        "https://raw.githubusercontent.com/SevenworksDev/proxy-list/main/proxies/socks5.txt"
+    ).split(",") if s.strip()
+]
+try:
+    PROXY_POOL_SAMPLE = int(os.getenv("PROXY_POOL_SAMPLE", "100"))
+    PROXY_POOL_TIMEOUT = float(os.getenv("PROXY_POOL_TIMEOUT", "4"))
+    PROXY_POOL_CONCURRENCY = int(os.getenv("PROXY_POOL_CONCURRENCY", "20"))
+    PROXY_POOL_CACHE_TTL = int(os.getenv("PROXY_POOL_CACHE_TTL", "86400"))
+except ValueError:
+    PROXY_POOL_SAMPLE = 100
+    PROXY_POOL_TIMEOUT = 4.0
+    PROXY_POOL_CONCURRENCY = 20
+    PROXY_POOL_CACHE_TTL = 86400
+
 _missing = []
 if not BOT_TOKEN:
     _missing.append("BOT_TOKEN")

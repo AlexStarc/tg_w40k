@@ -1021,13 +1021,24 @@ async def main():
                 session = None
                 continue
 
+        if not session:
+            logger.warning("All configured proxies failed; sampling remote SOCKS5 pool...")
+            try:
+                import proxy_pool
+                pool_proxy = await proxy_pool.find_working_proxy(TG_PROXIES)
+                if pool_proxy:
+                    logger.info("Pool fallback proxy: %s", pool_proxy)
+                    session = AiohttpSession(proxy=pool_proxy)
+            except Exception:
+                logger.exception("Proxy pool fallback failed")
+
     bot = Bot(
         token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         request_timeout=60,
         session=session,
     )
-    logger.info("Bot initialized%s", f" with proxy: {proxies_to_try[0]}" if session else " without proxy")
+    logger.info("Bot initialized%s", " with active session (direct or proxy)" if session else " WITHOUT working session — set_my_commands will likely fail")
 
     await bot.set_my_commands(
         [BotCommand(command=c, description=d) for c, d in (
