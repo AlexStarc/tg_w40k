@@ -33,7 +33,7 @@ TG_PROXIES = [
     p.strip()
     for p in os.getenv(
         "TG_PROXIES",
-        "socks5://182.48.78.141:8008,socks5://72.195.34.35:27360,socks5://174.75.211.193:4145",
+        "socks5://119.28.13.138:1080,socks5://220.158.233.26:1080,socks5://70.166.65.160:4145",
     ).split(",")
     if p.strip()
 ]
