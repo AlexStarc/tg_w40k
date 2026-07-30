@@ -54,7 +54,8 @@ TG_MTPROTO_PROXIES_RAW = os.getenv("TG_MTPROTO_PROXIES", "")
 PROXY_REMOTE_SOURCES = [
     s.strip() for s in os.getenv(
         "PROXY_REMOTE_SOURCES",
-        "https://raw.githubusercontent.com/SevenworksDev/proxy-list/main/proxies/socks5.txt"
+        "https://raw.githubusercontent.com/SevenworksDev/proxy-list/main/proxies/socks5.txt,"
+        "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt"
     ).split(",") if s.strip()
 ]
 try:
