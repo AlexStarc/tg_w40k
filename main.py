@@ -102,8 +102,9 @@ async def cmd_help(message: Message):
         "/meme_add <i>цитата :: панчлайн :: dark</i> — добавить пару в банк\n"
         "/meme_seed <i>[N]</i> — освежить банк через GLM\n"
         "/meme_harvest — собрать посты из каналов-источников\n"
-        "/meme_channels — статус каналов-источников\n\n"
-        "<i>Авто: летопись в 00:05 МСК, харвест+освежение банка мемов в 04:00.</i>"
+        "/meme_channels — статус каналов-источников\n"
+        "/proxy_rotate — сменить прокси вручную\n\n"
+        "<i>Авто: летопись в 00:05 МСК, харвест+освежение банка мемов в 04:00, health-check каждые 30 мин.</i>"
     )
 
 
@@ -848,6 +849,34 @@ async def cmd_meme_channels(message: Message):
     await message.answer("\n".join(lines))
 
 
+@dp.message(Command("proxy_rotate"))
+async def cmd_proxy_rotate(message: Message):
+    """Manually trigger proxy rotation: close current session, find a fresh
+    proxy (TG_PROXIES first, then the remote pool), rebind bot.session."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    status = await message.answer("🔄 Ротирую прокси (закрываю session, ищу новый)…")
+    try:
+        try:
+            await bot.session.close()
+        except Exception:
+            logger.exception("proxy_rotate: failed to close old session")
+        new_proxy = await _find_any_working_proxy()
+        bot.session = AiohttpSession(proxy=new_proxy) if new_proxy else AiohttpSession()
+        if new_proxy:
+            await status.edit_text(f"✅ Новый прокси: <code>{new_proxy}</code>")
+        else:
+            await status.edit_text(
+                "⚠️ Не нашёл рабочего прокси (ни TG_PROXIES, ни пул). Сессия — direct."
+            )
+    except Exception as e:
+        logger.exception("proxy_rotate failed")
+        try:
+            await status.edit_text(f"❌ {e}")
+        except Exception:
+            await message.answer(f"❌ {e}")
+
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_message(message: Message):
     if message.chat.id != TARGET_CHAT_ID:
@@ -1108,6 +1137,7 @@ async def main():
             ("meme_seed", "освежить банк через GLM"),
             ("meme_harvest", "харвест цитат из каналов"),
             ("meme_channels", "статус источников-каналов"),
+            ("proxy_rotate", "сменить прокси вручную"),
         )],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID),
     )
