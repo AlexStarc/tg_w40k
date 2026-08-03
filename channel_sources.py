@@ -32,6 +32,7 @@ class Post:
     date: datetime
     text: Optional[str]
     has_media: bool
+    image_bytes: Optional[bytes] = None  # populated only when fetched with download_images=True
 
 
 def _has_telethon() -> bool:
@@ -161,17 +162,49 @@ async def _iter_posts(target: str, limit: int, min_id: Optional[int]) -> list:
         return []
 
 
-def _to_post(channel: str, msg) -> Optional[Post]:
+def _to_post(channel: str, msg, *, require_text: bool = True) -> Optional[Post]:
+    """Build a Post from a telethon Message. By default skips media-only posts
+    (no caption). Pass require_text=False to keep them — caller can then fetch
+    their image bytes via download_post_image()."""
     text = getattr(msg, "text", None) or getattr(msg, "message", None)
-    if not text:
+    has_media = bool(getattr(msg, "media", None))
+    if require_text and not text:
+        return None
+    if not text and not has_media:
         return None
     return Post(
         channel=channel,
         tg_id=msg.id,
         date=getattr(msg, "date", None),
         text=text,
-        has_media=bool(getattr(msg, "media", None)),
+        has_media=has_media,
     )
+
+
+async def download_post_image(channel: str, tg_id: int) -> Optional[bytes]:
+    """Re-fetch a single message by tg_id and download its photo as bytes.
+    Returns None if the message has no downloadable media."""
+    try:
+        from telethon.tl.custom import Message as TgMessage  # noqa: F401
+    except ImportError:
+        return None
+    client = await get_client()
+    target = _resolve(channel)
+    try:
+        msg = await client.get_messages(target, ids=tg_id)
+        if not msg:
+            return None
+        if isinstance(msg, list):
+            msg = msg[0] if msg else None
+            if not msg:
+                return None
+        if not getattr(msg, "media", None):
+            return None
+        data = await client.download_media(msg, file=bytes)
+        return data if isinstance(data, (bytes, bytearray)) else None
+    except Exception:
+        logger.exception("download_post_image failed for %s/%d", channel, tg_id)
+        return None
 
 
 async def fetch_recent(channel: str, limit: int = 50) -> list[Post]:
@@ -181,9 +214,17 @@ async def fetch_recent(channel: str, limit: int = 50) -> list[Post]:
     return [p for p in (_to_post(channel, m) for m in msgs) if p]
 
 
-async def fetch_since(channel: str, last_tg_id: Optional[int], limit: int = 100) -> list[Post]:
+async def fetch_since(channel: str, last_tg_id: Optional[int], limit: int = 100,
+                      include_media_only: bool = False) -> list[Post]:
     """Fetch text-bearing posts with id > last_tg_id (newer). If last_tg_id is
-    None, behaves like fetch_recent (initial backfill)."""
+    None, behaves like fetch_recent (initial backfill).
+
+    Pass include_media=True to also keep posts that have only an image (no
+    caption) — caller can then call download_post_image() to get bytes and
+    run them through a vision model."""
     target = _resolve(channel)
     msgs = await _iter_posts(target, limit, last_tg_id)
-    return [p for p in (_to_post(channel, m) for m in msgs) if p]
+    return [
+        p for p in (_to_post(channel, m, require_text=not include_media_only) for m in msgs)
+        if p
+    ]

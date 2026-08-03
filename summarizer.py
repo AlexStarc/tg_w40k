@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import base64
 from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -49,12 +50,15 @@ from config import (
     TOKEN_LIMIT_INPUT,
     CHARS_PER_TOKEN,
     MESSAGES_PER_CHUNK,
+    VISION_MODEL,
+    VISION_MAX_TOKENS,
 )
 from prompts import (
     WARHAMMER_SYSTEM,
     ANALYST_SYSTEM,
     EDITOR_SYSTEM,
     QUIET_DAY_SYSTEM,
+    VISION_DESC_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,40 @@ async def _call_glm(payload: dict) -> dict:
             response.raise_for_status()
             logger.info("Fallback GLM response OK, model=%s", FALLBACK_MODEL)
             return response.json()
+
+
+async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
+    """Vision-describe an image via GLM-4V. Returns a short Russian description
+    usable as a TG-channel caption (see VISION_DESC_PROMPT). Raises on network
+    error; caller is expected to handle gracefully."""
+    if not image_bytes:
+        return ""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    },
+                    {"type": "text", "text": VISION_DESC_PROMPT},
+                ],
+            }
+        ],
+        "max_tokens": VISION_MAX_TOKENS,
+        "temperature": 0.4,
+    }
+    result = await _call_glm(payload)
+    try:
+        text = result["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError):
+        text = ""
+    text = text.strip()
+    logger.info("vision describe: %d bytes image -> %d chars text", len(image_bytes), len(text))
+    return text
 
 
 def _estimate_tokens(text: str) -> int:

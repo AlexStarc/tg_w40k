@@ -59,7 +59,7 @@ from database import (
     get_channels_state,
 )
 import database as database_mod
-from summarizer import summarize, generate_character_titles, _fix_fragment_number, _call_glm
+from summarizer import summarize, generate_character_titles, _fix_fragment_number, _call_glm, describe_image
 import meme as meme_mod
 import channel_sources
 import json as _json
@@ -726,19 +726,43 @@ async def harvest_channels(channels: list[str] | None = None,
     per_chan = []
     for ch in chans:
         last = await get_channel_state(ch)
-        posts = await channel_sources.fetch_since(ch, last, limit=80)
+        posts = await channel_sources.fetch_since(ch, last, limit=80, include_media_only=True)
         if not posts:
-            per_chan.append({"channel": ch, "fetched": 0, "new_cached": 0, "added": 0})
+            per_chan.append({"channel": ch, "fetched": 0, "new_cached": 0, "added": 0,
+                             "vision_described": 0})
             continue
-        rows = [(p.tg_id, p.text) for p in posts]
+        # Enrich image-only posts with a vision-generated pseudo-caption.
+        vision_count = 0
+        for p in posts:
+            if p.text or not p.has_media:
+                continue
+            img = await channel_sources.download_post_image(ch, p.tg_id)
+            if not img:
+                continue
+            try:
+                desc = await describe_image(img)
+            except Exception:
+                logger.exception("vision describe failed for %s/%d", ch, p.tg_id)
+                continue
+            if desc:
+                p.text = desc
+                vision_count += 1
+        # Drop anything still without text (e.g. vision failed or non-photo media).
+        usable = [p for p in posts if p.text]
+        if not usable:
+            per_chan.append({"channel": ch, "fetched": len(posts), "new_cached": 0,
+                             "added": 0, "vision_described": vision_count})
+            continue
+        rows = [(p.tg_id, p.text) for p in usable]
         try:
             new_cached = await save_channel_posts(ch, rows)
         except Exception:
             logger.exception("save_channel_posts failed for %s", ch)
             new_cached = 0
-        added = await _extract_pairs_from_posts(ch, posts, per)
+        added = await _extract_pairs_from_posts(ch, usable, per)
         per_chan.append({"channel": ch, "fetched": len(posts),
-                         "new_cached": new_cached, "added": added})
+                         "new_cached": new_cached, "added": added,
+                         "vision_described": vision_count})
         total_added += added
     meme_mod.cap_bank()
     return {"channels": per_chan, "added": total_added}
@@ -818,8 +842,10 @@ async def cmd_meme_harvest(message: Message):
             return
         lines = [f"📡 Харвест завершён: +{res['added']} цитат"]
         for s in res["channels"]:
+            vision = s.get("vision_described", 0)
+            vtag = f", vision={vision}" if vision else ""
             lines.append(
-                f"  • {s['channel']}: fetched={s['fetched']}, new_cached={s['new_cached']}, +{s['added']}"
+                f"  • {s['channel']}: fetched={s['fetched']}, new_cached={s['new_cached']}, +{s['added']}{vtag}"
             )
         await status.edit_text("\n".join(lines))
     except Exception as e:

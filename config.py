@@ -116,6 +116,8 @@ GLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 PRIMARY_MODEL = "glm-5.1"
 FALLBACK_MODEL = "glm-5-turbo"
 MEME_MODEL = os.getenv("MEME_MODEL", "glm-5.2")
+VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-plus")
+VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "600"))
 MAX_TOKENS = 15000
 MODEL_RESPONSE_TIMEOUT = 120
 
