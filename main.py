@@ -726,7 +726,32 @@ async def harvest_channels(channels: list[str] | None = None,
     per_chan = []
     for ch in chans:
         last = await get_channel_state(ch)
-        posts = await channel_sources.fetch_since(ch, last, limit=80, include_media_only=True)
+        # Retry the fetch on transient Telethon/network errors — close_client()
+        # between attempts so get_client() re-runs the full proxy candidate
+        # chain (including a fresh random sample from the remote SOCKS5 pool).
+        posts: list = []
+        last_fetch_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                posts = await channel_sources.fetch_since(
+                    ch, last, limit=80, include_media_only=True
+                )
+                last_fetch_err = None
+                break
+            except Exception as e:
+                last_fetch_err = e
+                logger.warning(
+                    "harvest fetch attempt %d/3 for %s failed: %s",
+                    attempt + 1, ch, e,
+                )
+                await channel_sources.close_client()
+                if attempt < 2:
+                    await asyncio.sleep(30 * (attempt + 1))
+        if last_fetch_err is not None:
+            logger.error("harvest: giving up on %s after 3 attempts: %s", ch, last_fetch_err)
+            per_chan.append({"channel": ch, "fetched": 0, "new_cached": 0, "added": 0,
+                             "vision_described": 0, "error": str(last_fetch_err)})
+            continue
         if not posts:
             per_chan.append({"channel": ch, "fetched": 0, "new_cached": 0, "added": 0,
                              "vision_described": 0})
