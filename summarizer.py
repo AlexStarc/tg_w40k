@@ -118,6 +118,10 @@ async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
       3. GLM via VISION_MODEL — fallback. z.ai /coding/paas/v4 currently
          exposes only text models on most tariffs, so this rarely works.
 
+    All non-GLM backends route through the cached working SOCKS5 from the DB
+    (settings.last_pool_proxy / last_mtproto_proxy) — both Google and OpenAI
+    block RF IP space directly.
+
     Raises on network/HTTP error; caller is expected to handle gracefully."""
     if not image_bytes:
         return ""
@@ -130,6 +134,35 @@ async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     text = (text or "").strip()
     logger.info("vision describe: %d bytes image -> %d chars text", len(image_bytes), len(text))
     return text
+
+
+async def _get_vision_http_client(timeout: int) -> "httpx.AsyncClient":
+    """Build an httpx.AsyncClient for vision API calls. If a cached working
+    SOCKS5 exists in DB (settings.last_pool_proxy or last_mtproto_proxy), use
+    it — Google/OpenAI block RF IPs directly, so we need to route through the
+    same proxy that Pyrogram already uses for Telegram."""
+    cached_url = None
+    try:
+        # Lazy import to avoid pulling DB into GLM-only summarization paths.
+        from database import get_setting
+        for key in ("last_mtproto_proxy", "last_pool_proxy"):
+            v = await get_setting(key)
+            if v:
+                cached_url = v
+                break
+    except Exception:
+        logger.exception("Failed to read cached SOCKS5 for vision client")
+
+    if cached_url:
+        try:
+            from httpx_socks import AsyncProxyTransport
+            transport = AsyncProxyTransport.from_url(cached_url)
+            client = httpx.AsyncClient(timeout=timeout, transport=transport)
+            logger.debug("vision HTTP client via proxy %s", cached_url)
+            return client
+        except Exception:
+            logger.exception("Failed to build SOCKS5 transport for vision; falling back to direct")
+    return httpx.AsyncClient(timeout=timeout)
 
 
 async def _describe_image_gemini(image_bytes: bytes, mime: str) -> str:
@@ -148,7 +181,7 @@ async def _describe_image_gemini(image_bytes: bytes, mime: str) -> str:
         },
     }
     url = f"{GEMINI_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
+    async with await _get_vision_http_client(MODEL_RESPONSE_TIMEOUT) as client:
         response = await client.post(url, json=payload)
         if response.status_code >= 400:
             logger.error(
@@ -183,7 +216,7 @@ async def _describe_image_openai(image_bytes: bytes, mime: str) -> str:
         "temperature": 0.4,
     }
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
+    async with await _get_vision_http_client(MODEL_RESPONSE_TIMEOUT) as client:
         response = await client.post(OPENAI_URL, headers=headers, json=payload)
         if response.status_code >= 400:
             logger.error(

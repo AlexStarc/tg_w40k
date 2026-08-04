@@ -3,6 +3,7 @@ aiosqlite
 apscheduler
 python-dotenv
 httpx
+httpx-socks
 tenacity
 aiohttp-socks
 pillow
