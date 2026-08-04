@@ -19,7 +19,6 @@ Pre-requisites:
 import asyncio
 import os
 import sys
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from pyrogram import Client
@@ -33,25 +32,64 @@ SESSION = os.getenv("TG_SESSION", "tg_w40k_user")
 
 def _login_proxy() -> dict | None:
     """Optional proxy for the login flow only (env PYROGRAM_LOGIN_PROXY).
-    Useful if Telegram is unreachable directly from this machine."""
+    Useful if Telegram is unreachable directly from this machine.
+
+    Accepted formats:
+      socks5://host:port | socks4://host:port | http://host:port
+      mtproto://host:port/secret   (Pyrogram-native MTProto proxy)
+    If unset but TG_MTPROTO_PROXIES is set, falls back to the first entry
+    there so the same MTProto used by the bot can authenticate the session."""
+    from urllib.parse import urlparse
+
     raw = os.getenv("PYROGRAM_LOGIN_PROXY", "").strip()
-    if not raw:
+
+    if raw:
+        # mtproto://host:port/secret — custom scheme, parse by hand
+        if raw.lower().startswith("mtproto://"):
+            tail = raw[len("mtproto://"):]
+            # tail = host:port/secret
+            try:
+                host_port, secret = tail.rsplit("/", 1)
+                host, port = host_port.rsplit(":", 1)
+                port_i = int(port)
+            except ValueError:
+                return None
+            if host and port_i and secret:
+                return {"hostname": host, "port": port_i, "secret": secret}
+            return None
+        try:
+            parsed = urlparse(raw)
+        except Exception:
+            return None
+        scheme = (parsed.scheme or "").lower()
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return None
+        if scheme in ("socks5", "socks5h"):
+            return {"scheme": "socks5", "hostname": host, "port": port}
+        if scheme == "socks4":
+            return {"scheme": "socks4", "hostname": host, "port": port}
+        if scheme in ("http", "https"):
+            return {"scheme": "http", "hostname": host, "port": port}
         return None
+
+    # No explicit override — try the first TG_MTPROTO_PROXIES entry, if any.
+    mts = os.getenv("TG_MTPROTO_PROXIES", "").strip()
+    if not mts:
+        return None
+    first = mts.split(",", 1)[0].strip()
+    parts = first.split(":")
+    if len(parts) < 3:
+        return None
+    secret = parts[-1]
     try:
-        parsed = urlparse(raw)
-    except Exception:
+        port = int(parts[-2])
+    except ValueError:
         return None
-    scheme = (parsed.scheme or "").lower()
-    host = parsed.hostname
-    port = parsed.port
-    if not host or not port:
-        return None
-    if scheme in ("socks5", "socks5h"):
-        return {"scheme": "socks5", "hostname": host, "port": port}
-    if scheme == "socks4":
-        return {"scheme": "socks4", "hostname": host, "port": port}
-    if scheme in ("http", "https"):
-        return {"scheme": "http", "hostname": host, "port": port}
+    host = ":".join(parts[:-2])
+    if host and port and secret:
+        return {"hostname": host, "port": port, "secret": secret}
     return None
 
 
