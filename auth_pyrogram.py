@@ -17,6 +17,7 @@ Pre-requisites:
   - TG_API_ID and TG_API_HASH in .env (get them at https://my.telegram.org).
 """
 import asyncio
+import logging
 import os
 import sys
 
@@ -24,6 +25,12 @@ from dotenv import load_dotenv
 from pyrogram import Client
 
 load_dotenv()
+
+# PYROGRAM_DEBUG=1 enables pyrogram's DEBUG logs so the real connection
+# failure (timeout / refused / bad secret) isn't masked by the NoneType bug.
+if os.getenv("PYROGRAM_DEBUG"):
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("pyrogram").setLevel(logging.DEBUG)
 
 API_ID = os.getenv("TG_API_ID")
 API_HASH = os.getenv("TG_API_HASH")
@@ -120,7 +127,19 @@ async def main() -> int:
     )
     # Pyrogram will prompt for phone / code / 2FA password automatically if the
     # session file doesn't exist or is unauthorized.
-    await app.start()
+    try:
+        await app.start()
+    except AttributeError as e:
+        if "NoneType" in str(e):
+            print(
+                "\n❌ Pyrogram failed to connect via this proxy. Common causes:\n"
+                "  - the MTProto proxy/secret is dead (they only live weeks)\n"
+                "  - the network blocks the proxy port\n"
+                "  - a Pyrogram 2.0.106 bug masking the real error.\n"
+                "Run with PYROGRAM_DEBUG=1 to see the underlying connection error.",
+                file=sys.stderr,
+            )
+        raise
     me = await app.get_me()
     uname = f"@{me.username}" if me.username else "(no username)"
     print(f"\n✅ Authorized as {me.first_name} ({uname}).")
