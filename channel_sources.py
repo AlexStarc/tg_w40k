@@ -81,7 +81,10 @@ def _proxy_candidates() -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     for host, port, secret in config.TG_MTPROTO_PROXIES:
         out.append((f"mtproto({host}:{port})", {
-            "hostname": host, "port": port, "secret": secret,
+            "scheme": "mtproto",
+            "hostname": host,
+            "port": port,
+            "secret": secret,
         }))
     seen_urls: set[str] = set()
     explicit = [config.TG_TELETHON_PROXY] if config.TG_TELETHON_PROXY else []

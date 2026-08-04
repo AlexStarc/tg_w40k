@@ -62,7 +62,7 @@ def _login_proxy() -> dict | None:
             except ValueError:
                 return None
             if host and port_i and secret:
-                return {"hostname": host, "port": port_i, "secret": secret}
+                return {"scheme": "mtproto", "hostname": host, "port": port_i, "secret": secret}
             return None
         try:
             parsed = urlparse(raw)
@@ -96,7 +96,7 @@ def _login_proxy() -> dict | None:
         return None
     host = ":".join(parts[:-2])
     if host and port and secret:
-        return {"hostname": host, "port": port, "secret": secret}
+        return {"scheme": "mtproto", "hostname": host, "port": port, "secret": secret}
     return None
 
 
