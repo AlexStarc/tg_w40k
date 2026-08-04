@@ -130,6 +130,7 @@ async def get_client():
 
         async def _try(kind: str, proxy: dict | None) -> bool:
             nonlocal last_err
+            global _client
             try:
                 app = Client(
                     config.TG_SESSION,
