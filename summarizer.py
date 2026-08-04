@@ -109,31 +109,68 @@ async def _call_glm(payload: dict) -> dict:
 
 async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     """Vision-describe an image. Returns a short Russian description usable
-    as a TG-channel caption (see VISION_DESC_PROMPT).
+    as a TG-channel caption.
 
-    Backend priority:
-      1. Gemini (if GEMINI_API_KEY) — free, but Google-accounts from RF blocked.
-      2. OpenAI (if OPENAI_API_KEY) — paid (~$0.15/1M input on gpt-4o-mini),
-         works from anywhere with a healthy OpenAI account.
-      3. GLM via VISION_MODEL — fallback. z.ai /coding/paas/v4 currently
-         exposes only text models on most tariffs, so this rarely works.
+    Backend priority (with graceful fallback):
+      1. Gemini (if GEMINI_API_KEY) — best quality, but Google-accounts from
+         RF blocked and 403 falls through to OCR.
+      2. OpenAI (if OPENAI_API_KEY) — also blocked from RF (403).
+      3. Tesseract OCR — LOCAL, always works if installed. For text-based
+         memes (image + caption) this captures the joke that's the essence
+         of the post. Default for users without vision-API access.
+      4. GLM via VISION_MODEL — last resort (z.ai usually has no vision).
 
-    All non-GLM backends route through the cached working SOCKS5 from the DB
-    (settings.last_pool_proxy / last_mtproto_proxy) — both Google and OpenAI
-    block RF IP space directly.
-
-    Raises on network/HTTP error; caller is expected to handle gracefully."""
+    Raises only on Tesseract failures (which are rare); other backends
+    log + fall through."""
     if not image_bytes:
         return ""
+
+    # 1. Gemini
     if GEMINI_API_KEY:
-        text = await _describe_image_gemini(image_bytes, mime)
-    elif OPENAI_API_KEY:
-        text = await _describe_image_openai(image_bytes, mime)
-    else:
-        text = await _describe_image_glm(image_bytes, mime)
-    text = (text or "").strip()
-    logger.info("vision describe: %d bytes image -> %d chars text", len(image_bytes), len(text))
-    return text
+        try:
+            text = await _describe_image_gemini(image_bytes, mime)
+            if text:
+                return text.strip()
+            logger.warning("Gemini returned empty; falling back")
+        except Exception:
+            logger.warning("Gemini failed; falling back", exc_info=True)
+
+    # 2. OpenAI
+    if OPENAI_API_KEY:
+        try:
+            text = await _describe_image_openai(image_bytes, mime)
+            if text:
+                return text.strip()
+            logger.warning("OpenAI returned empty; falling back")
+        except Exception:
+            logger.warning("OpenAI failed; falling back", exc_info=True)
+
+    # 3. Tesseract (local OCR — no API key needed)
+    text = _describe_image_tesseract(image_bytes)
+    if text:
+        return text
+
+    # 4. GLM-4V (rarely available)
+    return (await _describe_image_glm(image_bytes, mime)).strip()
+
+
+def _describe_image_tesseract(image_bytes: bytes) -> str:
+    """Extract text from image via Tesseract OCR. Returns the recognized
+    text (Russian + English) found on the image. For text-based memes
+    (image + caption) this captures the joke. Requires system tesseract
+    binary plus rus+eng language data."""
+    try:
+        import io as _io
+        import pytesseract
+        from PIL import Image
+        img = Image.open(_io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(img, lang="rus+eng")
+        text = (text or "").strip()
+        logger.info("OCR: %d bytes image -> %d chars text", len(image_bytes), len(text))
+        return text
+    except Exception as e:
+        logger.exception("Tesseract OCR failed: %s", e)
+        return ""
 
 
 async def _get_vision_http_client(timeout: int) -> "httpx.AsyncClient":

@@ -9,3 +9,4 @@ aiohttp-socks
 pillow
 pyrofork
 tgcrypto
+pytesseract
