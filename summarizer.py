@@ -145,13 +145,11 @@ async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
         except Exception:
             logger.warning("OpenAI failed; falling back", exc_info=True)
 
-    # 3. Tesseract (local OCR — no API key needed)
-    text = _describe_image_tesseract(image_bytes)
-    if text:
-        return text
-
-    # 4. GLM-4V (rarely available)
-    return (await _describe_image_glm(image_bytes, mime)).strip()
+    # 3. Tesseract (local OCR — no API key needed). For images without text
+    # (rare for memes) OCR returns "" — caller skips the post. No GLM-4V
+    # fallback: z.ai currently exposes only text models, so that path always
+    # returns 400 'Unknown Model' and just spams the log.
+    return _describe_image_tesseract(image_bytes)
 
 
 def _describe_image_tesseract(image_bytes: bytes) -> str:
