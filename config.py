@@ -118,6 +118,12 @@ FALLBACK_MODEL = "glm-5-turbo"
 MEME_MODEL = os.getenv("MEME_MODEL", "glm-5.2")
 VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-plus")
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "600"))
+# Gemini is used as the primary vision backend when available — z.ai currently
+# exposes only text models. Get a free key at https://aistudio.google.com/app/apikey
+# (Gemini 1.5/2.0 Flash: 15 rpm, no charge for low volume).
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 MAX_TOKENS = 15000
 MODEL_RESPONSE_TIMEOUT = 120
 

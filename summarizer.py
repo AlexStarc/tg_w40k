@@ -52,6 +52,9 @@ from config import (
     MESSAGES_PER_CHUNK,
     VISION_MODEL,
     VISION_MAX_TOKENS,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GEMINI_URL,
 )
 from prompts import (
     WARHAMMER_SYSTEM,
@@ -102,11 +105,63 @@ async def _call_glm(payload: dict) -> dict:
 
 
 async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
-    """Vision-describe an image via GLM-4V. Returns a short Russian description
-    usable as a TG-channel caption (see VISION_DESC_PROMPT). Raises on network
-    error; caller is expected to handle gracefully."""
+    """Vision-describe an image. Returns a short Russian description usable
+    as a TG-channel caption (see VISION_DESC_PROMPT).
+
+    Backend selection:
+      - If GEMINI_API_KEY is set → use Gemini (gemini-1.5-flash by default).
+        Free tier covers ~15 req/min; vision is well-supported.
+      - Otherwise fall back to GLM via VISION_MODEL — note that z.ai currently
+        exposes only text models on the /coding/paas/v4 endpoint, so without
+        a Gemini key image-only posts cannot be captioned.
+
+    Raises on network/HTTP error; caller is expected to handle gracefully."""
     if not image_bytes:
         return ""
+    if GEMINI_API_KEY:
+        text = await _describe_image_gemini(image_bytes, mime)
+    else:
+        text = await _describe_image_glm(image_bytes, mime)
+    text = (text or "").strip()
+    logger.info("vision describe: %d bytes image -> %d chars text", len(image_bytes), len(text))
+    return text
+
+
+async def _describe_image_gemini(image_bytes: bytes, mime: str) -> str:
+    """Describe an image via Google Gemini REST API (no SDK needed)."""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": VISION_DESC_PROMPT},
+                {"inline_data": {"mime_type": mime, "data": b64}},
+            ]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": VISION_MAX_TOKENS,
+            "temperature": 0.4,
+        },
+    }
+    url = f"{GEMINI_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
+        response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            logger.error(
+                "Gemini HTTP %s on model=%s; body: %s",
+                response.status_code, GEMINI_MODEL, response.text[:1000]
+            )
+        response.raise_for_status()
+        data = response.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"] or ""
+    except (KeyError, IndexError):
+        logger.warning("Gemini response shape unexpected: %s", str(data)[:500])
+        return ""
+
+
+async def _describe_image_glm(image_bytes: bytes, mime: str) -> str:
+    """Describe an image via z.ai GLM-4V (rarely available — most tariffs
+    don't include vision). Kept as fallback for accounts that do have it."""
     b64 = base64.b64encode(image_bytes).decode("ascii")
     payload = {
         "model": VISION_MODEL,
@@ -127,12 +182,9 @@ async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     }
     result = await _call_glm(payload)
     try:
-        text = result["choices"][0]["message"].get("content") or ""
+        return result["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError):
-        text = ""
-    text = text.strip()
-    logger.info("vision describe: %d bytes image -> %d chars text", len(image_bytes), len(text))
-    return text
+        return ""
 
 
 def _estimate_tokens(text: str) -> int:
