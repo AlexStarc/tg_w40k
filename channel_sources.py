@@ -91,12 +91,23 @@ async def get_client():
         """Attempt to connect + authorize. On success sets _client and returns True."""
         nonlocal last_err
         try:
-            client = TelegramClient(
-                config.TG_SESSION,
-                int(config.TG_API_ID),  # type: ignore[arg-type]
-                config.TG_API_HASH,  # type: ignore[arg-type]
-                proxy=proxy,
-            )
+            kwargs: dict = {
+                "session": config.TG_SESSION,
+                "api_id": int(config.TG_API_ID),  # type: ignore[arg-type]
+                "api_hash": config.TG_API_HASH,  # type: ignore[arg-type]
+                "proxy": proxy,
+            }
+            # MTProto proxy (3-tuple with string host + secret) requires an
+            # MTProto-aware connection class. Without this Telethon tries to
+            # route it through PySocks and fails with "Unknown proxy protocol
+            # type: <hostname>".
+            if kind.startswith("mtproto"):
+                try:
+                    from telethon.network.connection import ConnectionTcpAbridged
+                    kwargs["connection"] = ConnectionTcpAbridged
+                except ImportError:
+                    logger.warning("ConnectionTcpAbridged unavailable; mtproto proxy may fail")
+            client = TelegramClient(**kwargs)
             await client.connect()
             if not await client.is_user_authorized():
                 await client.disconnect()
