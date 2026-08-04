@@ -27,7 +27,7 @@ UNSPLASH_API_KEY=<your-unsplash-api-key>          #   any subset works; the
 PIXABAY_API_KEY=<your-pixabay-api-key>            #   fallback chain covers the rest
 TG_API_ID=<your-telegram-api-id>                  # optional, learn from channels —
 TG_API_HASH=<your-telegram-api-hash>              #   get at my.telegram.org
-TG_SESSION=tg_w40k_user                           #   session name (created via auth_telethon.py)
+TG_SESSION=tg_w40k_user                           #   session name (created via auth_pyrogram.py)
 MEME_SOURCE_CHANNELS=@kateeeeg,@danya_vologda     #   channels to harvest captions/style from
 MEME_HARVEST_PER_CHANNEL=3                        #   pairs to extract per channel per run
 ```
@@ -36,7 +36,7 @@ MEME_HARVEST_PER_CHANNEL=3                        #   pairs to extract per chann
 > of that channel. Omit it to keep the meme generator in preview-only mode.
 > Image sources are a fallback chain: configured keyed services + Openverse (no key) →
 > Lorem Picsum (guaranteed). Meme generation works with **zero** image API keys.
-> `MEME_SOURCE_CHANNELS` is optional. If set, run `python auth_telethon.py` once (after
+> `MEME_SOURCE_CHANNELS` is optional. If set, run `python auth_pyrogram.py` once (after
 > filling `TG_API_ID`/`TG_API_HASH`) to authorize a user-mode Telegram session; the bot
 > then harvests captions from those channels for both punchline extraction and style
 > orientation (see below).
@@ -64,8 +64,8 @@ python main.py
 | `/meme` | Generate a meme, send it to the admin for review (admin only) |
 | `/meme_add quote :: punchline :: dark` | Append a quote+punchline pair to `bank.json` (`:: tone` optional, default `light`) |
 | `/meme_seed [N]` | Generate N (default 8) new quote pairs via GLM and append to the bank (admin only) |
-| `/meme_harvest` | Pull fresh captions from `MEME_SOURCE_CHANNELS` and extract new pairs via GLM (admin only; needs Telethon) |
-| `/meme_channels` | Show source-channel status: cached posts count, last fetch time, Telethon auth state (admin only) |
+| `/meme_harvest` | Pull fresh captions from `MEME_SOURCE_CHANNELS` and extract new pairs via GLM (admin only; needs Pyrogram) |
+| `/meme_channels` | Show source-channel status: cached posts count, last fetch time, Pyrogram auth state (admin only) |
 
 ## How It Works
 
@@ -102,19 +102,20 @@ the result to the admin for review before publishing to the configured channel.
    is capped (oldest auto-pairs pruned beyond 120). Since freshly-added pairs start
    unrated, weak ones sink out of rotation once rated low — the feedback loop keeps
    the bank clean. `/meme_seed N` triggers a manual refresh
-6. **Channel learning** (optional, requires a Telethon user-session): set
+6. **Channel learning** (optional, requires a Pyrogram user-session): set
    `MEME_SOURCE_CHANNELS=@chan1,@chan2,…` and `TG_API_ID`/`TG_API_HASH` in `.env`,
-   then run `python auth_telethon.py` once to log in (phone + code + optional 2FA).
+   then run `python auth_pyrogram.py` once to log in (phone + code + optional 2FA).
    The bot reads captions from those channels in two ways:
    - **Harvest**: each daily refresh (and on-demand via `/meme_harvest`) pulls new
-     captions via Telethon, caches them in the `channel_posts` table, and asks GLM
+     captions via Pyrogram, caches them in the `channel_posts` table, and asks GLM
      to extract up to `MEME_HARVEST_PER_CHANNEL` new quote pairs per channel in the
      Crisiswoman format. Pairs land in `bank.json` with `source = @channel` so they
-     are traceable.
+     are traceable. Image-only posts are captioned via GLM-4V (`VISION_MODEL`)
+     before being cached.
    - **Style orientation (few-shot)**: every `/meme_seed` run prepends a small
      random sample of cached captions to the GLM prompt as a style reference, so
      freshly generated pairs drift toward the tone/rhythm of the channels you like.
-   `/meme_channels` shows per-channel cache size, last fetch time, and Telethon auth
+   `/meme_channels` shows per-channel cache size, last fetch time, and Pyrogram auth
    state. Disable any time by clearing `MEME_SOURCE_CHANNELS` — the bot falls back
    to the GLM-only seed flow.
 

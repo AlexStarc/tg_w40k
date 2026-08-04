@@ -1,10 +1,13 @@
-"""Telethon wrapper for reading posts from meme source channels.
+"""Pyrogram wrapper for reading posts from meme source channels.
 
 A user-mode Telegram session (NOT the bot) is used so the bot can read any
-public channel the user is subscribed to. Run `auth_telethon.py` once to
-create the .session file; the bot uses it read-only afterwards.
+public channel the user is subscribed to. Run `python auth_pyrogram.py` once
+to create the .session file; the bot uses it read-only afterwards.
 
-The module degrades gracefully when telethon is not installed: is_configured()
+Pyrogram supports MTProto proxies natively (no extra bridge required), which
+is the main reason we use it instead of Telethon.
+
+The module degrades gracefully when Pyrogram is not installed: is_configured()
 returns False and callers fall back to the existing GLM-only seed flow without
 crashing the bot on import.
 """
@@ -16,12 +19,13 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 
 import config
 
 logger = logging.getLogger(__name__)
 
-_client = None
+_client = None  # type: Optional[object]
 _lock = asyncio.Lock()
 
 
@@ -35,24 +39,24 @@ class Post:
     image_bytes: Optional[bytes] = None  # populated only when fetched with download_images=True
 
 
-def _has_telethon() -> bool:
+def _has_pyrogram() -> bool:
     try:
-        importlib.import_module("telethon")
+        importlib.import_module("pyrogram")
         return True
     except ImportError:
         return False
 
 
 def is_configured() -> bool:
-    """True only if BOTH env vars AND telethon are available. When this returns
+    """True only if BOTH env vars AND Pyrogram are available. When this returns
     False, callers fall back to the GLM-only seed flow without raising."""
-    return bool(config.TG_API_ID and config.TG_API_HASH) and _has_telethon()
+    return bool(config.TG_API_ID and config.TG_API_HASH) and _has_pyrogram()
 
 
 def _resolve(channel: str) -> str:
     """Normalize '@username' / 'https://t.me/x[/123]' / raw username to a form
-    Telethon understands. Returns '@username' or the raw string if it looks
-    like a numeric/invite id."""
+    Pyrogram understands. Returns '@username' or the raw string if it looks
+    like a numeric id."""
     c = channel.strip()
     if not c:
         return c
@@ -68,169 +72,120 @@ def _resolve(channel: str) -> str:
     return c
 
 
+def _proxy_candidates() -> list[tuple[str, dict]]:
+    """Build the ordered proxy candidate list (kind, pyrogram-proxy-dict).
+
+    Order: MTProto entries (TG_MTPROTO_PROXIES) → all TG_PROXIES (SOCKS5/HTTP).
+    Pyrogram accepts proxy as a dict with 'scheme'/'hostname'/'port' (SOCKS/HTTP)
+    or 'hostname'/'port'/'secret' (MTProto)."""
+    out: list[tuple[str, dict]] = []
+    for host, port, secret in config.TG_MTPROTO_PROXIES:
+        out.append((f"mtproto({host}:{port})", {
+            "hostname": host, "port": port, "secret": secret,
+        }))
+    seen_urls: set[str] = set()
+    explicit = [config.TG_TELETHON_PROXY] if config.TG_TELETHON_PROXY else []
+    for url in explicit + list(config.TG_PROXIES):
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            continue
+        scheme = (parsed.scheme or "").lower()
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            continue
+        if scheme in ("socks5", "socks5h"):
+            out.append((f"socks5({url})", {"scheme": "socks5", "hostname": host, "port": port}))
+        elif scheme == "socks4":
+            out.append((f"socks4({url})", {"scheme": "socks4", "hostname": host, "port": port}))
+        elif scheme in ("http", "https"):
+            out.append((f"http({url})", {"scheme": "http", "hostname": host, "port": port}))
+    return out
+
+
 async def get_client():
-    """Lazy singleton. Tries MTProto proxies (if configured) first, then all
-    SOCKS/HTTP proxies from TG_PROXIES, then samples the remote SOCKS5 pool,
-    then a direct connection — first working wins. Raises RuntimeError if not
-    configured, telethon is missing, or every connection attempt fails
-    (including an unauthorized session)."""
+    """Lazy singleton. Tries each proxy candidate in order, then a direct
+    connection — first working wins. Raises RuntimeError if not configured,
+    Pyrogram is missing, or every connection attempt fails (including an
+    unauthorized session)."""
     global _client
-    if _client and _client.is_connected():
+    if _client is not None:
         return _client
     if not (config.TG_API_ID and config.TG_API_HASH):
-        raise RuntimeError("Telethon not configured: set TG_API_ID and TG_API_HASH")
+        raise RuntimeError("Pyrogram not configured: set TG_API_ID and TG_API_HASH")
     try:
-        from telethon import TelegramClient
+        from pyrogram import Client
     except ImportError as e:
         raise RuntimeError(
-            "telethon is not installed. Run `pip install -r requirements.txt` "
-            "(or `pip install telethon[socks]`) to enable channel harvesting."
+            "pyrogram is not installed. Run `pip install -r requirements.txt` "
+            "(or `pip install pyrogram tgcrypto`) to enable channel harvesting."
         ) from e
 
-    async def _try(kind: str, proxy) -> bool:
-        """Attempt to connect + authorize. On success sets _client and returns True."""
-        nonlocal last_err
-        nonlocal _mtproto_unsupported_logged
-        try:
-            kwargs: dict = {
-                "session": config.TG_SESSION,
-                "api_id": int(config.TG_API_ID),  # type: ignore[arg-type]
-                "api_hash": config.TG_API_HASH,  # type: ignore[arg-type]
-                "proxy": proxy,
-            }
-            # Telethon stable (1.x) doesn't actually route MTProto proxies
-            # through (host, port, secret) — PySocks intercepts and fails with
-            # 'Unknown proxy protocol type: <host>'. The flag below is kept only
-            # so a future Telethon that does support MTProto picks it up.
-            if kind.startswith("mtproto"):
-                try:
-                    from telethon.network.connection import ConnectionTcpAbridged
-                    kwargs["connection"] = ConnectionTcpAbridged
-                except ImportError:
-                    pass
-            client = TelegramClient(**kwargs)
-            await client.connect()
-            if not await client.is_user_authorized():
-                await client.disconnect()
-                raise RuntimeError(
-                    f"session '{config.TG_SESSION}' is not authorized. "
-                    "Run `python auth_telethon.py` once to log in."
-                )
-            logger.info("Telethon connected via %s: %r", kind, proxy)
-            _client = client
-            return True
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            msg = str(e)
-            # Telethon stable can't handle MTProto tuple — skip silently after the
-            # first such error so the log doesn't get spammed by all 3 entries.
-            if kind.startswith("mtproto") and "Unknown proxy protocol type" in msg:
-                if not _mtproto_unsupported_logged:
-                    logger.warning(
-                        "Telethon stable does not support MTProto proxies natively "
-                        "(got 'Unknown proxy protocol type'). Skipping all MTProto candidates. "
-                        "Use a local mtg bridge (SOCKS5 on localhost) and add it to TG_PROXIES instead."
-                    )
-                    _mtproto_unsupported_logged = True
-                return False
-            logger.warning("Telethon %s attempt failed (%s): %s", kind, proxy, e)
-            return False
-
     async with _lock:
-        if _client and _client.is_connected():
+        if _client is not None:
             return _client
 
-        # One-shot flag so we log the Telethon-stable MTProto limitation only
-        # once per get_client() call (the inner _try() may hit it 3 times).
-        _mtproto_unsupported_logged = False
-
-        # Build ordered candidate list:
-        #   1. MTProto proxies (Telegram-native)
-        #   2. TG_TELETHON_PROXY (explicit override) if set
-        #   3. All TG_PROXIES (SOCKS/HTTP)
-        #   4. Direct
-        candidates: list[tuple[str, object]] = []
-        for mt in config.TG_MTPROTO_PROXIES:
-            candidates.append(("mtproto", mt))
-        seen_urls: set[str] = set()
-        explicit = [config.TG_TELETHON_PROXY] if config.TG_TELETHON_PROXY else []
-        for url in explicit + list(config.TG_PROXIES):
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            tup = config.telethon_proxy_tuple(url)
-            if tup:
-                candidates.append((f"socks({url})", tup))
-        candidates.append(("direct", None))
+        async def _try(kind: str, proxy: dict | None) -> bool:
+            nonlocal last_err
+            try:
+                app = Client(
+                    config.TG_SESSION,
+                    api_id=int(config.TG_API_ID),  # type: ignore[arg-type]
+                    api_hash=config.TG_API_HASH,  # type: ignore[arg-type]
+                    proxy=proxy,
+                    no_updates=True,
+                    workdir=".",
+                )
+                await app.start()
+                me = await app.get_me()
+                logger.info("Pyrogram connected via %s as @%s", kind, me.username or "(no username)")
+                _client = app
+                return True
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("Pyrogram %s attempt failed: %s", kind, e)
+                # Pyrogram leaves a half-open client on failure — make sure it's stopped
+                try:
+                    await app.stop()  # type: ignore[name-defined]
+                except Exception:
+                    pass
+                return False
 
         last_err: Exception | None = None
-        for kind, proxy in candidates:
+        for kind, proxy in _proxy_candidates():
             if await _try(kind, proxy):
                 return _client
 
-        # Last-resort fallback: sample the remote SOCKS5 pool (same source as
-        # aiogram uses). Find a proxy that reaches api.telegram.org, then try
-        # it through Telethon. Up to POXY_POOL_SAMPLE candidates are tested
-        # for HTTP first by proxy_pool.find_working_proxy; only the winner is
-        # tried for Telethon here.
-        try:
-            import proxy_pool
-            pool_url = await proxy_pool.find_working_proxy(list(seen_urls))
-        except Exception:
-            logger.exception("proxy_pool lookup crashed during Telethon fallback")
-            pool_url = None
-        if pool_url:
-            tup = config.telethon_proxy_tuple(pool_url)
-            if tup and await _try(f"pool({pool_url})", tup):
-                return _client
+        # Direct (no proxy) as the final fallback.
+        if await _try("direct", None):
+            return _client
 
         raise RuntimeError(
-            f"All Telethon connection attempts failed ({len(candidates) + 1} tried). "
-            f"Last error: {last_err}"
+            f"All Pyrogram connection attempts failed. Last error: {last_err}"
         )
 
 
 async def close_client() -> None:
     global _client
-    if _client and _client.is_connected():
+    if _client is not None:
         try:
-            await _client.disconnect()
+            await _client.stop()  # type: ignore[attr-defined]
         except Exception:
-            logger.exception("telethon disconnect failed")
+            logger.exception("pyrogram stop failed")
     _client = None
 
 
-async def _iter_posts(target: str, limit: int, min_id: Optional[int]) -> list:
-    """Common iterator with FloodWait handling. Returns raw telethon messages."""
-    client = await get_client()
-    kwargs: dict = {"limit": limit}
-    if min_id is not None:
-        kwargs["min_id"] = min_id
-    try:
-        from telethon.errors import FloodWaitError
-    except ImportError:
-        FloodWaitError = ()  # type: ignore[assignment,misc]
-    try:
-        out = []
-        async for msg in client.iter_messages(target, **kwargs):
-            out.append(msg)
-        return out
-    except FloodWaitError as e:  # type: ignore[misc]
-        wait = min(int(e.seconds) + 1, 60)
-        logger.warning("FloodWait %ds on %s; backing off %ds", e.seconds, target, wait)
-        await asyncio.sleep(wait)
-        return []
-    except Exception:
-        logger.exception("iter_messages failed for %s", target)
-        return []
-
-
 def _to_post(channel: str, msg, *, require_text: bool = True) -> Optional[Post]:
-    """Build a Post from a telethon Message. By default skips media-only posts
+    """Build a Post from a Pyrogram Message. By default skips media-only posts
     (no caption). Pass require_text=False to keep them — caller can then fetch
     their image bytes via download_post_image()."""
-    text = getattr(msg, "text", None) or getattr(msg, "message", None)
-    has_media = bool(getattr(msg, "media", None))
+    text = getattr(msg, "text", None) or getattr(msg, "caption", None)
+    has_media = bool(getattr(msg, "media", None) or getattr(msg, "photo", None)
+                     or getattr(msg, "document", None))
     if require_text and not text:
         return None
     if not text and not has_media:
@@ -247,46 +202,80 @@ def _to_post(channel: str, msg, *, require_text: bool = True) -> Optional[Post]:
 async def download_post_image(channel: str, tg_id: int) -> Optional[bytes]:
     """Re-fetch a single message by tg_id and download its photo as bytes.
     Returns None if the message has no downloadable media."""
-    try:
-        from telethon.tl.custom import Message as TgMessage  # noqa: F401
-    except ImportError:
-        return None
     client = await get_client()
     target = _resolve(channel)
     try:
-        msg = await client.get_messages(target, ids=tg_id)
-        if not msg:
+        msg = await client.get_messages(target, message_ids=tg_id)  # type: ignore[attr-defined]
+        if not msg or not (getattr(msg, "photo", None) or getattr(msg, "document", None)):
             return None
-        if isinstance(msg, list):
-            msg = msg[0] if msg else None
-            if not msg:
-                return None
-        if not getattr(msg, "media", None):
+        buf = await client.download_media(msg, in_memory=True)  # type: ignore[attr-defined]
+        if buf is None:
             return None
-        data = await client.download_media(msg, file=bytes)
-        return data if isinstance(data, (bytes, bytearray)) else None
+        # Pyrogram returns BytesIO; read it as bytes
+        data = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf)
+        return data if data else None
     except Exception:
         logger.exception("download_post_image failed for %s/%d", channel, tg_id)
         return None
 
 
+async def _fetch(client, target: str, limit: int,
+                 last_tg_id: Optional[int], require_text: bool) -> list:
+    """Common fetch loop with FloodWait handling. Returns the raw Pyrogram
+    Message list (newest first). Stops early when we cross last_tg_id."""
+    out: list = []
+    try:
+        from pyrogram.errors import FloodWait
+    except ImportError:
+        FloodWait = ()  # type: ignore[assignment,misc]
+    offset = 0
+    try:
+        while len(out) < limit:
+            batch: list = []
+            async for msg in client.get_chat_history(target, limit=50, offset=offset):  # type: ignore[attr-defined]
+                batch.append(msg)
+            if not batch:
+                break
+            for msg in batch:
+                if last_tg_id is not None and msg.id <= last_tg_id:
+                    return out  # reached already-seen messages
+                out.append(msg)
+                if len(out) >= limit:
+                    break
+            offset += len(batch)
+            if len(batch) < 50:
+                break  # end of channel history
+        return out
+    except FloodWait as e:  # type: ignore[misc]
+        wait = min(int(getattr(e, "value", 30)) + 1, 60)
+        logger.warning("FloodWait %ss on %s; backing off", getattr(e, "value", 30), target)
+        await asyncio.sleep(wait)
+        return out
+    except Exception:
+        logger.exception("get_chat_history failed for %s", target)
+        return out
+
+
 async def fetch_recent(channel: str, limit: int = 50) -> list[Post]:
     """Fetch up to `limit` most recent text-bearing posts from a channel."""
     target = _resolve(channel)
-    msgs = await _iter_posts(target, limit, None)
+    client = await get_client()
+    msgs = await _fetch(client, target, limit, None, require_text=True)
     return [p for p in (_to_post(channel, m) for m in msgs) if p]
 
 
 async def fetch_since(channel: str, last_tg_id: Optional[int], limit: int = 100,
                       include_media_only: bool = False) -> list[Post]:
-    """Fetch text-bearing posts with id > last_tg_id (newer). If last_tg_id is
-    None, behaves like fetch_recent (initial backfill).
+    """Fetch posts newer than last_tg_id. If last_tg_id is None, behaves like
+    fetch_recent (initial backfill).
 
-    Pass include_media=True to also keep posts that have only an image (no
-    caption) — caller can then call download_post_image() to get bytes and
-    run them through a vision model."""
+    Pass include_media_only=True to also keep posts that have only an image
+    (no caption) — caller can then call download_post_image() to get bytes
+    and run them through a vision model."""
     target = _resolve(channel)
-    msgs = await _iter_posts(target, limit, last_tg_id)
+    client = await get_client()
+    msgs = await _fetch(client, target, limit, last_tg_id,
+                        require_text=not include_media_only)
     return [
         p for p in (_to_post(channel, m, require_text=not include_media_only) for m in msgs)
         if p

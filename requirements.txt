@@ -6,4 +6,5 @@ httpx
 tenacity
 aiohttp-socks
 pillow
-telethon[socks]
+pyrogram
+tgcrypto
