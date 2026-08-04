@@ -75,17 +75,13 @@ def _resolve(channel: str) -> str:
 def _proxy_candidates() -> list[tuple[str, dict]]:
     """Build the ordered proxy candidate list (kind, pyrogram-proxy-dict).
 
-    Order: MTProto entries (TG_MTPROTO_PROXIES) → all TG_PROXIES (SOCKS5/HTTP).
-    Pyrogram accepts proxy as a dict with 'scheme'/'hostname'/'port' (SOCKS/HTTP)
-    or 'hostname'/'port'/'secret' (MTProto)."""
+    Pyrogram / pyrofork support only SOCKS4/SOCKS5/HTTP via PySocks — MTProto
+    is NOT supported through the `proxy=` parameter (PySocks has no MTPROTO
+    type). To use an MTProto upstream, run a local mtg bridge and add its
+    SOCKS5 endpoint (socks5://127.0.0.1:<port>) to TG_PROXIES.
+
+    Order: all TG_PROXIES (SOCKS/HTTP) → explicit TG_TELETHON_PROXY."""
     out: list[tuple[str, dict]] = []
-    for host, port, secret in config.TG_MTPROTO_PROXIES:
-        out.append((f"mtproto({host}:{port})", {
-            "scheme": "mtproto",
-            "hostname": host,
-            "port": port,
-            "secret": secret,
-        }))
     seen_urls: set[str] = set()
     explicit = [config.TG_TELETHON_PROXY] if config.TG_TELETHON_PROXY else []
     for url in explicit + list(config.TG_PROXIES):
