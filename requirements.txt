@@ -6,5 +6,5 @@ httpx
 tenacity
 aiohttp-socks
 pillow
-pyrogram
+pyrofork
 tgcrypto
