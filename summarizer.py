@@ -76,6 +76,15 @@ async def _call_glm(payload: dict) -> dict:
     async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
         try:
             response = await client.post(GLM_URL, headers=_headers, json=payload)
+            if response.status_code >= 400:
+                # Log the response body on 4xx/5xx — z.ai usually returns a JSON
+                # error like {"error":{"code":"...","message":"..."}} that explains
+                # the cause (bad model name, malformed image, quota, etc).
+                body = response.text
+                logger.error(
+                    "GLM HTTP %s on model=%s; body: %s",
+                    response.status_code, payload.get("model"), body[:1000]
+                )
             response.raise_for_status()
             logger.info("GLM response OK, model=%s", payload.get("model"))
             return response.json()
