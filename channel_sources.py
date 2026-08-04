@@ -90,6 +90,7 @@ async def get_client():
     async def _try(kind: str, proxy) -> bool:
         """Attempt to connect + authorize. On success sets _client and returns True."""
         nonlocal last_err
+        nonlocal _mtproto_unsupported_logged
         try:
             kwargs: dict = {
                 "session": config.TG_SESSION,
@@ -97,16 +98,16 @@ async def get_client():
                 "api_hash": config.TG_API_HASH,  # type: ignore[arg-type]
                 "proxy": proxy,
             }
-            # MTProto proxy (3-tuple with string host + secret) requires an
-            # MTProto-aware connection class. Without this Telethon tries to
-            # route it through PySocks and fails with "Unknown proxy protocol
-            # type: <hostname>".
+            # Telethon stable (1.x) doesn't actually route MTProto proxies
+            # through (host, port, secret) — PySocks intercepts and fails with
+            # 'Unknown proxy protocol type: <host>'. The flag below is kept only
+            # so a future Telethon that does support MTProto picks it up.
             if kind.startswith("mtproto"):
                 try:
                     from telethon.network.connection import ConnectionTcpAbridged
                     kwargs["connection"] = ConnectionTcpAbridged
                 except ImportError:
-                    logger.warning("ConnectionTcpAbridged unavailable; mtproto proxy may fail")
+                    pass
             client = TelegramClient(**kwargs)
             await client.connect()
             if not await client.is_user_authorized():
@@ -120,12 +121,28 @@ async def get_client():
             return True
         except Exception as e:  # noqa: BLE001
             last_err = e
+            msg = str(e)
+            # Telethon stable can't handle MTProto tuple — skip silently after the
+            # first such error so the log doesn't get spammed by all 3 entries.
+            if kind.startswith("mtproto") and "Unknown proxy protocol type" in msg:
+                if not _mtproto_unsupported_logged:
+                    logger.warning(
+                        "Telethon stable does not support MTProto proxies natively "
+                        "(got 'Unknown proxy protocol type'). Skipping all MTProto candidates. "
+                        "Use a local mtg bridge (SOCKS5 on localhost) and add it to TG_PROXIES instead."
+                    )
+                    _mtproto_unsupported_logged = True
+                return False
             logger.warning("Telethon %s attempt failed (%s): %s", kind, proxy, e)
             return False
 
     async with _lock:
         if _client and _client.is_connected():
             return _client
+
+        # One-shot flag so we log the Telethon-stable MTProto limitation only
+        # once per get_client() call (the inner _try() may hit it 3 times).
+        _mtproto_unsupported_logged = False
 
         # Build ordered candidate list:
         #   1. MTProto proxies (Telegram-native)
