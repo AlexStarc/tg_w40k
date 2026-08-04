@@ -55,6 +55,9 @@ from config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GEMINI_URL,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_URL,
 )
 from prompts import (
     WARHAMMER_SYSTEM,
@@ -108,18 +111,20 @@ async def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     """Vision-describe an image. Returns a short Russian description usable
     as a TG-channel caption (see VISION_DESC_PROMPT).
 
-    Backend selection:
-      - If GEMINI_API_KEY is set → use Gemini (gemini-1.5-flash by default).
-        Free tier covers ~15 req/min; vision is well-supported.
-      - Otherwise fall back to GLM via VISION_MODEL — note that z.ai currently
-        exposes only text models on the /coding/paas/v4 endpoint, so without
-        a Gemini key image-only posts cannot be captioned.
+    Backend priority:
+      1. Gemini (if GEMINI_API_KEY) — free, but Google-accounts from RF blocked.
+      2. OpenAI (if OPENAI_API_KEY) — paid (~$0.15/1M input on gpt-4o-mini),
+         works from anywhere with a healthy OpenAI account.
+      3. GLM via VISION_MODEL — fallback. z.ai /coding/paas/v4 currently
+         exposes only text models on most tariffs, so this rarely works.
 
     Raises on network/HTTP error; caller is expected to handle gracefully."""
     if not image_bytes:
         return ""
     if GEMINI_API_KEY:
         text = await _describe_image_gemini(image_bytes, mime)
+    elif OPENAI_API_KEY:
+        text = await _describe_image_openai(image_bytes, mime)
     else:
         text = await _describe_image_glm(image_bytes, mime)
     text = (text or "").strip()
@@ -156,6 +161,41 @@ async def _describe_image_gemini(image_bytes: bytes, mime: str) -> str:
         return data["candidates"][0]["content"]["parts"][0]["text"] or ""
     except (KeyError, IndexError):
         logger.warning("Gemini response shape unexpected: %s", str(data)[:500])
+        return ""
+
+
+async def _describe_image_openai(image_bytes: bytes, mime: str) -> str:
+    """Describe an image via OpenAI Chat Completions API (gpt-4o-mini by
+    default). Works from any region; ~$0.15/1M input tokens."""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_DESC_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ],
+            }
+        ],
+        "max_tokens": VISION_MAX_TOKENS,
+        "temperature": 0.4,
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
+        response = await client.post(OPENAI_URL, headers=headers, json=payload)
+        if response.status_code >= 400:
+            logger.error(
+                "OpenAI HTTP %s on model=%s; body: %s",
+                response.status_code, OPENAI_MODEL, response.text[:1000]
+            )
+        response.raise_for_status()
+        data = response.json()
+    try:
+        return data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError):
+        logger.warning("OpenAI response shape unexpected: %s", str(data)[:500])
         return ""
 
 

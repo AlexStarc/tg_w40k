@@ -124,6 +124,13 @@ VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "600"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+# OpenAI is the second vision backend. Needs OPENAI_API_KEY from
+# https://platform.openai.com/apikeys. gpt-4o-mini is the cheapest vision
+# option (~$0.15/1M input, $0.60/1M output). Works from any region if your
+# OpenAI account is in good standing.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 MAX_TOKENS = 15000
 MODEL_RESPONSE_TIMEOUT = 120
 
