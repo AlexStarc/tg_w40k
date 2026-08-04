@@ -174,3 +174,137 @@ async def find_working_proxy(configured: list[str] | None = None) -> str | None:
     else:
         logger.warning("No working proxy found in pool sample of %d", sample_size)
     return working
+
+
+# --------------------------------------------------------------- mtproto pool
+# Pyrogram/Telethon need to reach a Telegram MTProto DC (e.g. 149.154.167.51),
+# not api.telegram.org. Telegram filters public IPs much more aggressively
+# on the MTProto edge, so a SOCKS5 that works for aiogram may not work for
+# Pyrogram. This tester checks TCP-connect to a DC through SOCKS5.
+
+MTPROTO_DC = ("149.154.167.51", 443)
+
+
+def _test_socks5_to_mtproto_dc(host: str, port: int, timeout: float) -> bool:
+    """Open a TCP connection to MTPROTO_DC through a SOCKS5 proxy. We don't
+    need to speak MTProto — TCP-connect success is enough: it means the proxy
+    IP is not blocked by Telegram's MTProto edge filters."""
+    import socks as socks_mod
+    s = socks_mod.socksocket()
+    s.set_proxy(socks_mod.SOCKS5, host, port)
+    s.settimeout(timeout)
+    try:
+        s.connect(MTPROTO_DC)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+async def _find_mtproto_working(entries: list[str], sample_size: int,
+                                timeout: float, concurrency: int) -> str | None:
+    """Like _find_working but uses _test_socks5_to_mtproto_dc."""
+    sample = random.sample(entries, min(sample_size, len(entries)))
+    sem = asyncio.Semaphore(concurrency)
+    loop = asyncio.get_event_loop()
+    working: asyncio.Future = asyncio.get_event_loop().create_future()
+    pool = _get_thread_pool()
+
+    async def check(entry: str) -> None:
+        parts = entry.split(":")
+        if len(parts) != 2:
+            return
+        host = parts[0].strip()
+        try:
+            port = int(parts[1])
+        except ValueError:
+            return
+        async with sem:
+            if working.done():
+                return
+            ok = await loop.run_in_executor(
+                pool, _test_socks5_to_mtproto_dc, host, port, timeout
+            )
+            if ok and not working.done():
+                working.set_result(f"socks5://{host}:{port}")
+
+    tasks = [asyncio.create_task(check(e)) for e in sample]
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(working),
+            timeout=timeout * (len(sample) // concurrency + 1) + 5,
+        )
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+    return working.result() if working.done() and not working.cancelled() else None
+
+
+_thread_pool = None
+
+
+def _get_thread_pool():
+    """Lazy singleton ThreadPoolExecutor for blocking socks operations."""
+    global _thread_pool
+    if _thread_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _thread_pool = ThreadPoolExecutor(max_workers=64, thread_name_prefix="mtproto-test")
+    return _thread_pool
+
+
+async def find_working_mtproto_proxy(configured: list[str] | None = None) -> str | None:
+    """Find a SOCKS5 proxy that can carry MTProto traffic (TCP-reach the DC),
+    not just HTTP. Used by channel_sources as a last-resort fallback when all
+    TG_PROXIES fail for Pyrogram.
+
+    Cached separately from HTTP-pool in settings.last_mtproto_proxy.
+    Returns 'socks5://host:port' URL, or None if nothing works."""
+    configured = configured or []
+    sample_size = getattr(config, "PROXY_POOL_SAMPLE", 100)
+    timeout = getattr(config, "PROXY_POOL_TIMEOUT", 4.0)
+    concurrency = getattr(config, "PROXY_POOL_CONCURRENCY", 20)
+
+    # 1. Cached MTProto-working proxy
+    cached = None
+    try:
+        cached = await get_setting("last_mtproto_proxy")
+    except Exception:
+        logger.exception("Failed to read cached mtproto proxy")
+    if cached and cached not in configured:
+        host_port = cached.replace("socks5://", "")
+        host, _, port = host_port.partition(":")
+        try:
+            port_i = int(port)
+        except ValueError:
+            port_i = 0
+        if host and port_i:
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(
+                _get_thread_pool(), _test_socks5_to_mtproto_dc, host, port_i, timeout
+            )
+            if ok:
+                logger.info("Cached MTProto proxy still works: %s", cached)
+                return cached
+            logger.info("Cached MTProto proxy no longer works: %s", cached)
+
+    # 2. Fresh sample from the remote pool
+    entries = await _load_pool()
+    if not entries:
+        logger.warning("Proxy pool empty; MTProto fallback has no candidates")
+        return None
+
+    logger.info("Testing %d random proxies for MTProto DC reachability (of %d)...",
+                sample_size, len(entries))
+    working = await _find_mtproto_working(entries, sample_size, timeout, concurrency)
+    if working:
+        try:
+            await set_setting("last_mtproto_proxy", working)
+        except Exception:
+            logger.exception("Failed to cache working MTProto proxy")
+        logger.info("Found MTProto-working pool proxy: %s", working)
+    else:
+        logger.warning("No MTProto-working proxy found in sample of %d", sample_size)
+    return working

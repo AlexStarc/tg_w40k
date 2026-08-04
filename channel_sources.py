@@ -159,9 +159,35 @@ async def get_client():
             if await _try(kind, proxy):
                 return _client
 
-        # Direct (no proxy) as the final fallback.
+        # Direct (no proxy) as the next fallback.
         if await _try("direct", None):
             return _client
+
+        # Last-resort: sample the remote SOCKS5 pool and find a proxy that can
+        # actually reach the Telegram MTProto DC (not just api.telegram.org).
+        # This is the same logic as proxy_pool.find_working_proxy but tested
+        # against 149.154.167.51:443 — what Pyrogram really needs.
+        try:
+            import proxy_pool
+            configured_urls = list(config.TG_PROXIES) + (
+                [config.TG_TELETHON_PROXY] if config.TG_TELETHON_PROXY else []
+            )
+            mtproto_url = await proxy_pool.find_working_mtproto_proxy(configured_urls)
+        except Exception:
+            logger.exception("MTProto pool lookup crashed during Pyrogram fallback")
+            mtproto_url = None
+        if mtproto_url:
+            try:
+                parsed = urlparse(mtproto_url)
+                tup = {
+                    "scheme": "socks5",
+                    "hostname": parsed.hostname,
+                    "port": parsed.port,
+                }
+            except Exception:
+                tup = None
+            if tup and await _try(f"mtproto-pool({mtproto_url})", tup):
+                return _client
 
         raise RuntimeError(
             f"All Pyrogram connection attempts failed. Last error: {last_err}"
