@@ -108,12 +108,22 @@ def _proxy_candidates() -> list[tuple[str, dict]]:
 
 async def get_client():
     """Lazy singleton. Tries each proxy candidate in order, then a direct
-    connection — first working wins. Raises RuntimeError if not configured,
-    Pyrogram is missing, or every connection attempt fails (including an
-    unauthorized session)."""
+    connection — first working wins. If the cached client's connection has
+    dropped (public SOCKS5 die after days), it is stopped and the full proxy
+    chain — including the MTProto-capable remote pool — is re-run.
+    Raises RuntimeError if not configured, Pyrogram is missing, or every
+    connection attempt fails (including an unauthorized session)."""
     global _client
-    if _client is not None:
+    if _client is not None and _client.is_connected:
         return _client
+    if _client is not None:
+        # Stale client from a dead proxy — stop it before reconnecting.
+        logger.warning("Cached Pyrogram client is disconnected; rotating proxies")
+        try:
+            await _client.stop()
+        except Exception:
+            pass
+        _client = None
     if not (config.TG_API_ID and config.TG_API_HASH):
         raise RuntimeError("Pyrogram not configured: set TG_API_ID and TG_API_HASH")
     try:
@@ -277,6 +287,13 @@ async def _fetch(client, target: str, limit: int,
         logger.warning("FloodWait %ss on %s; backing off", getattr(e, "value", 30), target)
         await asyncio.sleep(wait)
         return out
+    except (ConnectionError, OSError, TimeoutError) as e:
+        # Connection-level failure: let the caller's retry logic kick in —
+        # harvest_channels will close_client() and re-run the proxy chain
+        # (including the MTProto-capable remote pool). Swallowing these made
+        # a dead SOCKS5 look like 'no new posts' (fetched=0) with zero errors.
+        logger.warning("connection lost fetching %s: %s", target, e)
+        raise
     except Exception:
         logger.exception("get_chat_history failed for %s", target)
         return out
