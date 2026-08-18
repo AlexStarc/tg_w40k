@@ -58,6 +58,15 @@ PROXY_REMOTE_SOURCES = [
         "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt"
     ).split(",") if s.strip()
 ]
+# Priority tier: small HEALTH-CHECKED socks5 lists (CI-verified upstream).
+# Tested in full BEFORE sampling the big raw pools above — a few hundred
+# verified entries beat a random sample of 100k unverified ones.
+PROXY_PRIORITY_SOURCES = [
+    s.strip() for s in os.getenv(
+        "PROXY_PRIORITY_SOURCES",
+        "https://raw.githubusercontent.com/xyzs996/free-proxy-health-list/main/socks5.txt"
+    ).split(",") if s.strip()
+]
 try:
     PROXY_POOL_SAMPLE = int(os.getenv("PROXY_POOL_SAMPLE", "100"))
     PROXY_POOL_TIMEOUT = float(os.getenv("PROXY_POOL_TIMEOUT", "4"))

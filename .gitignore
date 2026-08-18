@@ -28,6 +28,7 @@ bot_server.db
 
 # Downloaded socks5 proxy pool (re-fetched at runtime if missing)
 proxies_pool.txt
+proxies_priority.txt
 
 # Generated meme artifacts (never commit — reproducible at runtime)
 memes_cache/

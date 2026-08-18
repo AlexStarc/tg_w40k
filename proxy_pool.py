@@ -1,18 +1,21 @@
-"""Fallback SOCKS5 proxy pool.
+"""Fallback SOCKS5 proxy pool — two tiers.
 
-When all configured TG_PROXIES fail at startup, this module samples a public
-SOCKS5 list, tests a random subset concurrently for connectivity to
-api.telegram.org, and returns the first one that works. The result is cached
-in the DB (settings.last_pool_proxy) so the next startup fast-paths through it.
+When all configured TG_PROXIES fail, this module hunts for a working public
+SOCKS5 proxy:
 
-Strategy:
-  1. Try cached last_pool_proxy from DB (fast).
-  2. Load socks5 list from disk cache if fresh (<PROXY_POOL_CACHE_TTL>),
-     otherwise re-download from PROXY_REMOTE_SOURCES.
-  3. Sample N candidates, test concurrently, return first reachable.
+  Tier 1 (priority): small HEALTH-CHECKED lists (PROXY_PRIORITY_SOURCES,
+  e.g. xyzs996/free-proxy-health-list — CI-verified upstream). Tested in
+  full with high concurrency. A few hundred verified entries have a far
+  better hit rate than a random slice of the raw pools.
+  Tier 2 (bulk): big raw scraped lists (PROXY_REMOTE_SOURCES, ~100k+).
+  Random sample of PROXY_POOL_SAMPLE entries.
 
-This is a LAST resort: public SOCKS5 proxies are unreliable and Telegram often
-bans them. The bot logs every step so failure modes are observable.
+Winners are cached in the DB (settings.last_pool_proxy for Bot-API HTTP,
+settings.last_mtproto_proxy for Pyrogram MTProto-DC reachability) so the
+next run fast-paths through them.
+
+This is a LAST resort: public SOCKS5 proxies are unreliable and Telegram
+often bans them. The bot logs every step so failure modes are observable.
 """
 from __future__ import annotations
 
@@ -31,22 +34,22 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).parent
 POOL_CACHE = HERE / "proxies_pool.txt"
+PRIORITY_CACHE = HERE / "proxies_priority.txt"
 TEST_URL = "https://api.telegram.org"
 
 
-def _cache_fresh() -> bool:
-    if not POOL_CACHE.exists():
+def _cache_fresh(path: Path) -> bool:
+    if not path.exists():
         return False
     ttl = getattr(config, "PROXY_POOL_CACHE_TTL", 86400)
-    age = time.time() - POOL_CACHE.stat().st_mtime
+    age = time.time() - path.stat().st_mtime
     return age < ttl
 
 
-async def _download_pool() -> list[str]:
-    """Download socks5 lists from configured sources, dedup host:port lines."""
-    sources = getattr(config, "PROXY_REMOTE_SOURCES", []) or []
+async def _download(urls: list[str]) -> list[str]:
+    """Download socks5 lists from the given sources, dedup host:port lines."""
     out: set[str] = set()
-    for url in sources:
+    for url in urls:
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.get(url)
@@ -57,23 +60,40 @@ async def _download_pool() -> list[str]:
                         out.add(line)
         except Exception:
             logger.exception("Failed to download proxy list from %s", url)
-    if out:
-        try:
-            POOL_CACHE.write_text("\n".join(sorted(out)), encoding="utf-8")
-        except Exception:
-            logger.exception("Failed to write proxy pool cache")
-        logger.info("Proxy pool refreshed: %d entries from %d sources", len(out), len(sources))
     return list(out)
 
 
-async def _load_pool() -> list[str]:
-    """Return pool entries — disk cache if fresh, else re-download."""
-    if _cache_fresh():
+async def _load_list(urls: list[str], cache_path: Path, label: str) -> list[str]:
+    """Return list entries — fresh disk cache if available, else download and
+    refresh the cache."""
+    if _cache_fresh(cache_path):
         try:
-            return [line for line in POOL_CACHE.read_text(encoding="utf-8").splitlines() if line.strip()]
+            return [line for line in cache_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         except Exception:
-            logger.exception("Proxy pool cache read failed; re-downloading")
-    return await _download_pool()
+            logger.exception("%s cache read failed; re-downloading", label)
+    entries = await _download(urls)
+    if entries:
+        try:
+            cache_path.write_text("\n".join(sorted(entries)), encoding="utf-8")
+        except Exception:
+            logger.exception("Failed to write %s cache", label)
+        logger.info("%s refreshed: %d entries from %d sources", label, len(entries), len(urls))
+    return entries
+
+
+async def _load_pool() -> list[str]:
+    """Bulk tier: big raw public lists (sampled)."""
+    return await _load_list(
+        getattr(config, "PROXY_REMOTE_SOURCES", []) or [], POOL_CACHE, "Proxy pool"
+    )
+
+
+async def _load_priority_pool() -> list[str]:
+    """Priority tier: small health-checked lists (tested in full first)."""
+    urls = getattr(config, "PROXY_PRIORITY_SOURCES", []) or []
+    if not urls:
+        return []
+    return await _load_list(urls, PRIORITY_CACHE, "Priority proxy pool")
 
 
 async def _test_socks5(host: str, port: int, timeout: float) -> bool:
@@ -157,7 +177,22 @@ async def find_working_proxy(configured: list[str] | None = None) -> str | None:
                 return cached
             logger.info("Cached pool proxy no longer works: %s", cached)
 
-    # 2. Remote pool
+    # 2. Priority tier: health-checked lists — small, so test in FULL with a
+    #    higher concurrency before touching the big raw pools.
+    priority = await _load_priority_pool()
+    if priority:
+        logger.info("Testing %d priority (health-checked) proxies in full...", len(priority))
+        working = await _find_working(priority, len(priority), timeout, max(concurrency, 50))
+        if working:
+            try:
+                await set_setting("last_pool_proxy", working)
+            except Exception:
+                logger.exception("Failed to cache working pool proxy")
+            logger.info("Found working proxy in priority pool: %s", working)
+            return working
+        logger.info("Priority pool exhausted (%d tested); falling back to bulk pool", len(priority))
+
+    # 3. Bulk tier: random sample from the big raw lists.
     entries = await _load_pool()
     if not entries:
         logger.warning("Proxy pool is empty; no remote source succeeded")
@@ -290,7 +325,22 @@ async def find_working_mtproto_proxy(configured: list[str] | None = None) -> str
                 return cached
             logger.info("Cached MTProto proxy no longer works: %s", cached)
 
-    # 2. Fresh sample from the remote pool
+    # 2. Priority tier: health-checked lists — test in full with high
+    #    concurrency before sampling the big raw pools.
+    priority = await _load_priority_pool()
+    if priority:
+        logger.info("Testing %d priority (health-checked) proxies for MTProto DC...", len(priority))
+        working = await _find_mtproto_working(priority, len(priority), timeout, max(concurrency, 50))
+        if working:
+            try:
+                await set_setting("last_mtproto_proxy", working)
+            except Exception:
+                logger.exception("Failed to cache working MTProto proxy")
+            logger.info("Found MTProto-working proxy in priority pool: %s", working)
+            return working
+        logger.info("Priority pool exhausted for MTProto (%d tested); falling back to bulk pool", len(priority))
+
+    # 3. Fresh sample from the remote bulk pool
     entries = await _load_pool()
     if not entries:
         logger.warning("Proxy pool empty; MTProto fallback has no candidates")
