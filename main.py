@@ -1068,16 +1068,23 @@ async def daily_summarize(target_date: str = None) -> bool:
 
 async def _probe_bot_proxy(proxy_url: str) -> bool:
     """Full Bot-API probe through a proxy (get_me) — catches not just
-    connectivity but TLS-MITM proxies that break certificate validation."""
+    connectivity but TLS-MITM proxies that break certificate validation.
+    Always closes the probe session, success or failure."""
     token = os.getenv("BOT_TOKEN")
+    test_session = None
     try:
         test_session = AiohttpSession(proxy=proxy_url)
         test_bot = Bot(token=token, session=test_session, request_timeout=10)
         await test_bot.get_me()
-        await test_session.close()
         return True
     except Exception:
         return False
+    finally:
+        if test_session:
+            try:
+                await test_session.close()
+            except Exception:
+                pass
 
 
 async def _find_any_working_proxy() -> str | None:
@@ -1143,12 +1150,24 @@ async def main():
     session = None
     proxies_to_try = []
 
+    async def _cleanup_probe(test_bot: Bot, keep_session: bool = False) -> None:
+        """Close a probe bot's aiohttp session unless we're keeping it for the
+        real bot (only on the winning proxy). Prevents 'Unclosed client
+        session' leaks from failed probes."""
+        try:
+            if not keep_session and test_bot.session:
+                await test_bot.session.close()
+        except Exception:
+            pass
+
     try:
         logger.info("Testing direct connection without proxy...")
         test_bot = Bot(token=bot_token, request_timeout=10)
         await test_bot.get_me()
         logger.info("Direct connection works, no proxy needed")
+        await _cleanup_probe(test_bot)
     except Exception as e:
+        await _cleanup_probe(test_bot)
         logger.warning("Direct connection failed: %s, trying proxies...", e)
         proxies_to_try = TG_PROXIES if TG_PROXY else TG_PROXIES
 
@@ -1161,8 +1180,9 @@ async def main():
                 test_bot = Bot(token=bot_token, session=session, request_timeout=10)
                 await test_bot.get_me()
                 logger.info("Proxy works: %s", proxy_url)
-                break
+                break  # keep this session — it becomes the live bot session
             except Exception as pe:
+                await _cleanup_probe(test_bot)
                 logger.warning("Proxy %s failed: %s, trying next...", proxy_url, pe)
                 session = None
                 continue

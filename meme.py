@@ -502,15 +502,38 @@ async def _picsum(client) -> tuple:
     return (r.content, "picsum")
 
 
+async def _proxied_client() -> "httpx.AsyncClient | None":
+    """Build an httpx client routed through a cached working SOCKS5 from the
+    proxy pool DB cache (auto_proxies). Returns None if no cached proxy —
+    callers then stay direct. Blocking-safe: only reads the DB setting."""
+    try:
+        import json as _json
+        from database import get_setting
+        raw = await get_setting("auto_proxies")
+        proxies = [p for p in (_json.loads(raw) if raw else []) if isinstance(p, str)]
+        if not proxies:
+            return None
+        from httpx_socks import AsyncProxyTransport
+        transport = AsyncProxyTransport.from_url(proxies[0])
+        return httpx.AsyncClient(timeout=25, follow_redirects=True,
+                                 headers={"User-Agent": "tg_w40k/1.0"},
+                                 transport=transport)
+    except Exception:
+        return None
+
+
 async def fetch_background(*, pexels_key=None, unsplash_key=None,
                            pixabay_key=None) -> tuple:
     """Multi-source fallback chain → (image_bytes, source_name). Keyed sources
     (if configured) + Openverse are shuffled for variety; Picsum is always the
-    guaranteed last resort, so generation works with zero API keys."""
-    async with httpx.AsyncClient(
-        timeout=25, follow_redirects=True,
-        headers={"User-Agent": "tg_w40k/1.0"},
-    ) as client:
+    guaranteed last resort, so generation works with zero API keys.
+
+    Network resilience: image CDNs (Pexels etc.) are blocked from RF IPs —
+    the whole 403/404 wall. The chain first tries direct; on a transport-level
+    failure (ConnectTimeout/ConnectError — not just 'no results') it retries
+    once through a cached pool SOCKS5 before giving up on that source."""
+
+    async def _run_chain(client):
         sources = []
         if pexels_key:
             sources.append(lambda: _pexels(client, pexels_key))
@@ -523,11 +546,28 @@ async def fetch_background(*, pexels_key=None, unsplash_key=None,
         for src in sources:
             try:
                 got = await src()
+            except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
+                raise  # transport-level: surface for the proxied retry
             except Exception:
                 got = None
             if got:
                 return got
         return await _picsum(client)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=25, follow_redirects=True,
+            headers={"User-Agent": "tg_w40k/1.0"},
+        ) as client:
+            return await _run_chain(client)
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
+        pass  # fall through to the proxied retry
+
+    proxied = await _proxied_client()
+    if proxied is None:
+        raise RuntimeError("image CDNs unreachable and no cached pool proxy")
+    async with proxied as client:
+        return await _run_chain(client)
 
 
 # ----------------------------------------------------------------- bank
