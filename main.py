@@ -1066,25 +1066,36 @@ async def daily_summarize(target_date: str = None) -> bool:
     return True
 
 
-async def _find_any_working_proxy() -> str | None:
-    """Try each TG_PROXIES in order, then fall back to the remote pool. Returns
-    a 'socks5://host:port' (or http://) URL, or None if nothing reaches Telegram."""
+async def _probe_bot_proxy(proxy_url: str) -> bool:
+    """Full Bot-API probe through a proxy (get_me) — catches not just
+    connectivity but TLS-MITM proxies that break certificate validation."""
     token = os.getenv("BOT_TOKEN")
+    try:
+        test_session = AiohttpSession(proxy=proxy_url)
+        test_bot = Bot(token=token, session=test_session, request_timeout=10)
+        await test_bot.get_me()
+        await test_session.close()
+        return True
+    except Exception:
+        return False
+
+
+async def _find_any_working_proxy() -> str | None:
+    """TG_PROXIES from .env first, then auto-discovered winners from the
+    GitHub pools (proxy_pool caches a JSON list in settings.auto_proxies —
+    no manual .env edits needed when public proxies die)."""
     for proxy_url in TG_PROXIES:
-        try:
-            test_session = AiohttpSession(proxy=proxy_url)
-            test_bot = Bot(token=token, session=test_session, request_timeout=10)
-            await test_bot.get_me()
-            await test_session.close()
+        if await _probe_bot_proxy(proxy_url):
             return proxy_url
-        except Exception:
-            continue
     try:
         import proxy_pool
-        return await proxy_pool.find_working_proxy(TG_PROXIES)
+        winners = await proxy_pool.find_working_proxies(5, TG_PROXIES)
+        for winner in winners:
+            if await _probe_bot_proxy(winner):
+                return winner
     except Exception:
         logger.exception("proxy_pool lookup failed during health-check")
-        return None
+    return None
 
 
 async def health_check_proxy():
@@ -1157,15 +1168,14 @@ async def main():
                 continue
 
         if not session:
-            logger.warning("All configured proxies failed; sampling remote SOCKS5 pool...")
+            logger.warning("All configured proxies failed; auto-discovering from GitHub pools...")
             try:
-                import proxy_pool
-                pool_proxy = await proxy_pool.find_working_proxy(TG_PROXIES)
-                if pool_proxy:
-                    logger.info("Pool fallback proxy: %s", pool_proxy)
-                    session = AiohttpSession(proxy=pool_proxy)
+                auto_proxy = await _find_any_working_proxy()
+                if auto_proxy:
+                    logger.info("Auto-discovered proxy: %s", auto_proxy)
+                    session = AiohttpSession(proxy=auto_proxy)
             except Exception:
-                logger.exception("Proxy pool fallback failed")
+                logger.exception("Auto proxy discovery failed")
 
     bot = Bot(
         token=bot_token,

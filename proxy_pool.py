@@ -20,6 +20,7 @@ often bans them. The bot logs every step so failure modes are observable.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -115,100 +116,159 @@ async def _test_socks5(host: str, port: int, timeout: float) -> bool:
 async def _find_working(entries: list[str], sample_size: int,
                         timeout: float, concurrency: int) -> str | None:
     """Sample entries, test concurrently, return first 'socks5://host:port'."""
+    winners = await _find_many(entries, sample_size, 1, timeout, concurrency, "http")
+    return winners[0] if winners else None
+
+
+async def _find_many(entries: list[str], sample_size: int, count: int,
+                     timeout: float, concurrency: int, kind: str) -> list[str]:
+    """Test up to `sample_size` entries, collect up to `count` working
+    'socks5://host:port' URLs. kind: 'http' (Bot-API reachability) or
+    'mtproto' (MTProto-DC TCP reachability). Extra tasks are cancelled once
+    enough winners are found."""
     sample = random.sample(entries, min(sample_size, len(entries)))
     sem = asyncio.Semaphore(concurrency)
-    working: asyncio.Future = asyncio.get_event_loop().create_future()
+    loop = asyncio.get_event_loop()
+    winners: list[str] = []
+    lock = asyncio.Lock()
+    done_ev = asyncio.Event()
 
-    async def check(entry: str) -> None:
-        parts = entry.split(":")
-        if len(parts) != 2:
-            return
-        host = parts[0].strip()
-        try:
-            port = int(parts[1])
-        except ValueError:
-            return
-        async with sem:
-            if working.done():
+    if kind == "mtproto":
+        pool = _get_thread_pool()
+
+        async def check(entry: str) -> None:
+            host, port = _split(entry)
+            if not host:
                 return
-            ok = await _test_socks5(host, port, timeout)
-            if ok and not working.done():
-                working.set_result(f"socks5://{host}:{port}")
+            async with sem:
+                if done_ev.is_set():
+                    return
+                ok = await loop.run_in_executor(
+                    pool, _test_socks5_to_mtproto_dc, host, port, timeout
+                )
+                await _record(ok, host, port)
+    else:
+        async def check(entry: str) -> None:
+            host, port = _split(entry)
+            if not host:
+                return
+            async with sem:
+                if done_ev.is_set():
+                    return
+                ok = await _test_socks5(host, port, timeout)
+                await _record(ok, host, port)
+
+    async def _record(ok: bool, host: str, port: int) -> None:
+        nonlocal winners
+        if not ok:
+            return
+        async with lock:
+            if len(winners) >= count:
+                return
+            winners.append(f"socks5://{host}:{port}")
+            if len(winners) >= count:
+                done_ev.set()
 
     tasks = [asyncio.create_task(check(e)) for e in sample]
     try:
-        await asyncio.wait_for(asyncio.shield(working), timeout=timeout * (len(sample) // concurrency + 1) + 5)
+        await asyncio.wait_for(
+            done_ev.wait(),
+            timeout=timeout * (len(sample) // concurrency + 1) + 5,
+        )
     except asyncio.TimeoutError:
         pass
     finally:
+        done_ev.set()
         for t in tasks:
             if not t.done():
                 t.cancel()
-    return working.result() if working.done() and not working.cancelled() else None
+    return winners
+
+
+def _split(entry: str) -> tuple[str, int]:
+    parts = entry.split(":")
+    if len(parts) != 2:
+        return "", 0
+    try:
+        return parts[0].strip(), int(parts[1])
+    except ValueError:
+        return "", 0
 
 
 async def find_working_proxy(configured: list[str] | None = None) -> str | None:
-    """Return a working socks5:// URL, or None if none found.
+    """Compatibility wrapper — a single working socks5:// URL (Bot-API HTTP)."""
+    winners = await find_working_proxies(1, configured)
+    return winners[0] if winners else None
 
-    Order: cached last_pool_proxy from DB (fast) → fresh sample from the pool.
-    `configured` is used only to skip re-testing entries already in TG_PROXIES.
-    """
+
+async def find_working_proxies(count: int = 5,
+                               configured: list[str] | None = None) -> list[str]:
+    """Find up to `count` SOCKS5 proxies that reach api.telegram.org (HTTP,
+    what aiogram needs). Winners are cached as a JSON list in
+    settings.auto_proxies so startup/health-check reuse them without a new
+    scan. `configured` entries are excluded from results.
+
+    Order: cached still-alive winners → tier-1 health-checked list (full) →
+    tier-2 bulk pools (sample)."""
     configured = configured or []
-    sample_size = getattr(config, "PROXY_POOL_SAMPLE", 100)
     timeout = getattr(config, "PROXY_POOL_TIMEOUT", 4.0)
-    concurrency = getattr(config, "PROXY_POOL_CONCURRENCY", 20)
 
-    # 1. Cached last working proxy
-    cached = None
-    try:
-        cached = await get_setting("last_pool_proxy")
-    except Exception:
-        logger.exception("Failed to read cached pool proxy")
-    if cached and cached not in configured:
-        host_port = cached.replace("socks5://", "")
-        host, _, port = host_port.partition(":")
-        try:
-            port_i = int(port)
-        except ValueError:
-            port_i = 0
-        if host and port_i:
-            if await _test_socks5(host, port_i, timeout):
-                logger.info("Cached pool proxy still works: %s", cached)
-                return cached
-            logger.info("Cached pool proxy no longer works: %s", cached)
+    # 0. Cached winners that still pass a quick liveness check
+    cached = await _load_cached_list("auto_proxies")
+    alive = [p for p in cached if p not in configured and await _quick_alive(p, timeout)]
+    if alive:
+        logger.info("Cached auto-proxies still alive: %d of %d", len(alive), len(cached))
+        if len(alive) >= count:
+            return alive[:count]
 
-    # 2. Priority tier: health-checked lists — small, so test in FULL with a
-    #    higher concurrency before touching the big raw pools.
-    priority = await _load_priority_pool()
-    if priority:
-        logger.info("Testing %d priority (health-checked) proxies in full...", len(priority))
-        working = await _find_working(priority, len(priority), timeout, max(concurrency, 50))
-        if working:
-            try:
-                await set_setting("last_pool_proxy", working)
-            except Exception:
-                logger.exception("Failed to cache working pool proxy")
-            logger.info("Found working proxy in priority pool: %s", working)
-            return working
-        logger.info("Priority pool exhausted (%d tested); falling back to bulk pool", len(priority))
+    # 1. Priority tier (health-checked) → 2. Bulk tier
+    for label, loader, full in (
+        ("priority", _load_priority_pool, True),
+        ("bulk", _load_pool, False),
+    ):
+        entries = await loader()
+        if not entries:
+            continue
+        sample_size = len(entries) if full else getattr(config, "PROXY_POOL_SAMPLE", 100)
+        concurrency = max(getattr(config, "PROXY_POOL_CONCURRENCY", 20), 50) if full \
+            else getattr(config, "PROXY_POOL_CONCURRENCY", 20)
+        need = count - len(alive)
+        logger.info("Scanning %s pool (%d entries, need %d more)...", label, len(entries), need)
+        found = await _find_many(entries, sample_size, need, timeout, concurrency, "http")
+        alive.extend(found)
+        if len(alive) >= count:
+            break
 
-    # 3. Bulk tier: random sample from the big raw lists.
-    entries = await _load_pool()
-    if not entries:
-        logger.warning("Proxy pool is empty; no remote source succeeded")
-        return None
-
-    logger.info("Testing %d random proxies from pool (of %d)...", sample_size, len(entries))
-    working = await _find_working(entries, sample_size, timeout, concurrency)
-    if working:
-        try:
-            await set_setting("last_pool_proxy", working)
-        except Exception:
-            logger.exception("Failed to cache working pool proxy")
-        logger.info("Found working pool proxy: %s", working)
+    if alive:
+        await _save_cached_list("auto_proxies", alive)
+        logger.info("Auto-proxies (Bot-API): %s", alive)
     else:
-        logger.warning("No working proxy found in pool sample of %d", sample_size)
-    return working
+        logger.warning("No working proxies found in any pool")
+    return alive
+
+
+async def _quick_alive(proxy_url: str, timeout: float) -> bool:
+    host, port = _split(proxy_url.replace("socks5://", ""))
+    if not host:
+        return False
+    return await _test_socks5(host, port, timeout)
+
+
+async def _load_cached_list(key: str) -> list[str]:
+    try:
+        raw = await get_setting(key)
+        val = json.loads(raw) if raw else []
+        return [p for p in val if isinstance(p, str) and p.startswith("socks5://")]
+    except Exception:
+        logger.exception("Failed to read cached list %s", key)
+        return []
+
+
+async def _save_cached_list(key: str, proxies: list[str]) -> None:
+    try:
+        await set_setting(key, json.dumps(proxies))
+    except Exception:
+        logger.exception("Failed to cache list %s", key)
 
 
 # --------------------------------------------------------------- mtproto pool
@@ -238,44 +298,9 @@ def _test_socks5_to_mtproto_dc(host: str, port: int, timeout: float) -> bool:
 
 async def _find_mtproto_working(entries: list[str], sample_size: int,
                                 timeout: float, concurrency: int) -> str | None:
-    """Like _find_working but uses _test_socks5_to_mtproto_dc."""
-    sample = random.sample(entries, min(sample_size, len(entries)))
-    sem = asyncio.Semaphore(concurrency)
-    loop = asyncio.get_event_loop()
-    working: asyncio.Future = asyncio.get_event_loop().create_future()
-    pool = _get_thread_pool()
-
-    async def check(entry: str) -> None:
-        parts = entry.split(":")
-        if len(parts) != 2:
-            return
-        host = parts[0].strip()
-        try:
-            port = int(parts[1])
-        except ValueError:
-            return
-        async with sem:
-            if working.done():
-                return
-            ok = await loop.run_in_executor(
-                pool, _test_socks5_to_mtproto_dc, host, port, timeout
-            )
-            if ok and not working.done():
-                working.set_result(f"socks5://{host}:{port}")
-
-    tasks = [asyncio.create_task(check(e)) for e in sample]
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(working),
-            timeout=timeout * (len(sample) // concurrency + 1) + 5,
-        )
-    except asyncio.TimeoutError:
-        pass
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-    return working.result() if working.done() and not working.cancelled() else None
+    """Compatibility wrapper — first MTProto-DC-reachable proxy."""
+    winners = await _find_many(entries, sample_size, 1, timeout, concurrency, "mtproto")
+    return winners[0] if winners else None
 
 
 _thread_pool = None
@@ -291,70 +316,58 @@ def _get_thread_pool():
 
 
 async def find_working_mtproto_proxy(configured: list[str] | None = None) -> str | None:
-    """Find a SOCKS5 proxy that can carry MTProto traffic (TCP-reach the DC),
-    not just HTTP. Used by channel_sources as a last-resort fallback when all
-    TG_PROXIES fail for Pyrogram.
+    """Compatibility wrapper — a single MTProto-DC-reachable proxy."""
+    winners = await find_working_mtproto_proxies(1, configured)
+    return winners[0] if winners else None
 
-    Cached separately from HTTP-pool in settings.last_mtproto_proxy.
-    Returns 'socks5://host:port' URL, or None if nothing works."""
+
+async def find_working_mtproto_proxies(count: int = 5,
+                                       configured: list[str] | None = None) -> list[str]:
+    """Find up to `count` SOCKS5 proxies that can carry MTProto traffic
+    (TCP-reach the DC) — what Pyrogram needs. Cached as a JSON list in
+    settings.auto_mtproto_proxies. Same tiering as find_working_proxies."""
     configured = configured or []
-    sample_size = getattr(config, "PROXY_POOL_SAMPLE", 100)
     timeout = getattr(config, "PROXY_POOL_TIMEOUT", 4.0)
-    concurrency = getattr(config, "PROXY_POOL_CONCURRENCY", 20)
+    loop = asyncio.get_event_loop()
 
-    # 1. Cached MTProto-working proxy
-    cached = None
-    try:
-        cached = await get_setting("last_mtproto_proxy")
-    except Exception:
-        logger.exception("Failed to read cached mtproto proxy")
-    if cached and cached not in configured:
-        host_port = cached.replace("socks5://", "")
-        host, _, port = host_port.partition(":")
-        try:
-            port_i = int(port)
-        except ValueError:
-            port_i = 0
-        if host and port_i:
-            loop = asyncio.get_event_loop()
-            ok = await loop.run_in_executor(
-                _get_thread_pool(), _test_socks5_to_mtproto_dc, host, port_i, timeout
-            )
-            if ok:
-                logger.info("Cached MTProto proxy still works: %s", cached)
-                return cached
-            logger.info("Cached MTProto proxy no longer works: %s", cached)
+    # 0. Cached winners that still pass a quick MTProto liveness check
+    cached = await _load_cached_list("auto_mtproto_proxies")
+    alive: list[str] = []
+    for p in cached:
+        if p in configured:
+            continue
+        host, port = _split(p.replace("socks5://", ""))
+        if host and await loop.run_in_executor(
+            _get_thread_pool(), _test_socks5_to_mtproto_dc, host, port, timeout
+        ):
+            alive.append(p)
+    if alive:
+        logger.info("Cached MTProto auto-proxies still alive: %d of %d", len(alive), len(cached))
+        if len(alive) >= count:
+            return alive[:count]
 
-    # 2. Priority tier: health-checked lists — test in full with high
-    #    concurrency before sampling the big raw pools.
-    priority = await _load_priority_pool()
-    if priority:
-        logger.info("Testing %d priority (health-checked) proxies for MTProto DC...", len(priority))
-        working = await _find_mtproto_working(priority, len(priority), timeout, max(concurrency, 50))
-        if working:
-            try:
-                await set_setting("last_mtproto_proxy", working)
-            except Exception:
-                logger.exception("Failed to cache working MTProto proxy")
-            logger.info("Found MTProto-working proxy in priority pool: %s", working)
-            return working
-        logger.info("Priority pool exhausted for MTProto (%d tested); falling back to bulk pool", len(priority))
+    # 1. Priority tier → 2. Bulk tier
+    for label, loader, full in (
+        ("priority", _load_priority_pool, True),
+        ("bulk", _load_pool, False),
+    ):
+        entries = await loader()
+        if not entries:
+            continue
+        sample_size = len(entries) if full else getattr(config, "PROXY_POOL_SAMPLE", 100)
+        concurrency = max(getattr(config, "PROXY_POOL_CONCURRENCY", 20), 50) if full \
+            else getattr(config, "PROXY_POOL_CONCURRENCY", 20)
+        need = count - len(alive)
+        logger.info("Scanning %s pool for MTProto DC (%d entries, need %d more)...",
+                    label, len(entries), need)
+        found = await _find_many(entries, sample_size, need, timeout, concurrency, "mtproto")
+        alive.extend(found)
+        if len(alive) >= count:
+            break
 
-    # 3. Fresh sample from the remote bulk pool
-    entries = await _load_pool()
-    if not entries:
-        logger.warning("Proxy pool empty; MTProto fallback has no candidates")
-        return None
-
-    logger.info("Testing %d random proxies for MTProto DC reachability (of %d)...",
-                sample_size, len(entries))
-    working = await _find_mtproto_working(entries, sample_size, timeout, concurrency)
-    if working:
-        try:
-            await set_setting("last_mtproto_proxy", working)
-        except Exception:
-            logger.exception("Failed to cache working MTProto proxy")
-        logger.info("Found MTProto-working pool proxy: %s", working)
+    if alive:
+        await _save_cached_list("auto_mtproto_proxies", alive)
+        logger.info("Auto-proxies (MTProto): %s", alive)
     else:
-        logger.warning("No MTProto-working proxy found in sample of %d", sample_size)
-    return working
+        logger.warning("No MTProto-working proxies found in any pool")
+    return alive
