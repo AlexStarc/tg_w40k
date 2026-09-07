@@ -248,7 +248,12 @@ def _to_post(channel: str, msg, *, require_text: bool = True) -> Optional[Post]:
 
 async def download_post_image(channel: str, tg_id: int) -> Optional[bytes]:
     """Re-fetch a single message by tg_id and download its photo as bytes.
-    Returns None if the message has no downloadable media."""
+    Returns None if the message has no downloadable media.
+
+    Connection-level errors (ConnectionError/OSError/TimeoutError) PROPAGATE:
+    the caller rotates the client and stops hammering a dead proxy —
+    swallowing them made each stuck post burn ~2.5 min of Pyrogram internal
+    retries while the client stayed half-dead."""
     client = await get_client()
     target = _resolve(channel)
     try:
@@ -261,6 +266,10 @@ async def download_post_image(channel: str, tg_id: int) -> Optional[bytes]:
         # Pyrogram returns BytesIO; read it as bytes
         data = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf)
         return data if data else None
+    except (ConnectionError, OSError, TimeoutError):
+        logger.warning("connection lost downloading %s/%d; surfacing for rotation",
+                       channel, tg_id)
+        raise
     except Exception:
         logger.exception("download_post_image failed for %s/%d", channel, tg_id)
         return None

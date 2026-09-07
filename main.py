@@ -758,10 +758,21 @@ async def harvest_channels(channels: list[str] | None = None,
             continue
         # Enrich image-only posts with a vision-generated pseudo-caption.
         vision_count = 0
+        conn_dropped = False
         for p in posts:
             if p.text or not p.has_media:
                 continue
-            img = await channel_sources.download_post_image(ch, p.tg_id)
+            try:
+                img = await channel_sources.download_post_image(ch, p.tg_id)
+            except (ConnectionError, OSError, TimeoutError) as e:
+                # Proxy died mid-download: rotate the client and stop this
+                # channel's vision pass — remaining image-only posts will be
+                # re-fetched next run (their tg_ids stay above last_tg_id).
+                logger.warning("harvest: connection lost on %s/%d (%s); rotating client",
+                               ch, p.tg_id, e)
+                await channel_sources.close_client()
+                conn_dropped = True
+                break
             if not img:
                 continue
             try:
@@ -776,7 +787,8 @@ async def harvest_channels(channels: list[str] | None = None,
         usable = [p for p in posts if p.text]
         if not usable:
             per_chan.append({"channel": ch, "fetched": len(posts), "new_cached": 0,
-                             "added": 0, "vision_described": vision_count})
+                             "added": 0, "vision_described": vision_count,
+                             **({"conn_dropped": True} if conn_dropped else {})})
             continue
         rows = [(p.tg_id, p.text) for p in usable]
         try:
@@ -787,7 +799,8 @@ async def harvest_channels(channels: list[str] | None = None,
         added = await _extract_pairs_from_posts(ch, usable, per)
         per_chan.append({"channel": ch, "fetched": len(posts),
                          "new_cached": new_cached, "added": added,
-                         "vision_described": vision_count})
+                         "vision_described": vision_count,
+                         **({"conn_dropped": True} if conn_dropped else {})})
         total_added += added
     meme_mod.cap_bank()
     return {"channels": per_chan, "added": total_added}
@@ -869,8 +882,9 @@ async def cmd_meme_harvest(message: Message):
         for s in res["channels"]:
             vision = s.get("vision_described", 0)
             vtag = f", vision={vision}" if vision else ""
+            dtag = ", ⚠️conn" if s.get("conn_dropped") else ""
             lines.append(
-                f"  • {s['channel']}: fetched={s['fetched']}, new_cached={s['new_cached']}, +{s['added']}{vtag}"
+                f"  • {s['channel']}: fetched={s['fetched']}, new_cached={s['new_cached']}, +{s['added']}{vtag}{dtag}"
             )
         await status.edit_text("\n".join(lines))
     except Exception as e:
