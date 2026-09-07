@@ -141,6 +141,7 @@ async def get_client():
         async def _try(kind: str, proxy: dict | None) -> bool:
             nonlocal last_err
             global _client
+            app = None
             try:
                 app = Client(
                     config.TG_SESSION,
@@ -150,8 +151,17 @@ async def get_client():
                     no_updates=True,
                     workdir=".",
                 )
-                await app.start()
-                me = await app.get_me()
+                # Pyrogram's start() retries a dead proxy FOREVER internally
+                # ("Connection failed! Trying again...") and never surfaces the
+                # error, freezing the whole candidate chain. Bound it.
+                try:
+                    await asyncio.wait_for(app.start(), timeout=30)
+                except (asyncio.TimeoutError, TimeoutError):
+                    raise TimeoutError(
+                        f"{kind}: app.start() did not connect within 30s "
+                        "(proxy likely dead and Pyrogram retry-looping)"
+                    )
+                me = await asyncio.wait_for(app.get_me(), timeout=15)
                 logger.info("Pyrogram connected via %s as @%s", kind, me.username or "(no username)")
                 _client = app
                 return True
@@ -159,10 +169,11 @@ async def get_client():
                 last_err = e
                 logger.warning("Pyrogram %s attempt failed: %s", kind, e)
                 # Pyrogram leaves a half-open client on failure — make sure it's stopped
-                try:
-                    await app.stop()  # type: ignore[name-defined]
-                except Exception:
-                    pass
+                if app is not None:
+                    try:
+                        await app.stop()
+                    except Exception:
+                        pass
                 return False
 
         last_err: Exception | None = None
