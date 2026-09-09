@@ -55,17 +55,34 @@ WHITE = (255, 255, 255)
 DIM = (200, 188, 170)
 BLACK = (0, 0, 0)
 
-# moody search tags — real photos only, never AI
-BG_TAGS = [
-    "fog", "rain window", "empty room", "lonely street", "night city",
-    "grey sky", "empty bed", "kitchen night", "subway", "clouds",
-    "abandoned", "dark forest", "ocean grey", "desert road", "empty cafe",
-    "neon night", "snow", "old building", "tunnel", "wet asphalt",
+# moody search tags — real photos only, never AI.
+# Split by tone (P1): dark pairs get grim imagery, light pairs get softer
+# everyday imagery; NEUTRAL fits both. BG_TAGS kept as the full union.
+DARK_BG_TAGS = [
+    "fog", "rain window", "lonely street", "night city", "grey sky",
+    "abandoned", "dark forest", "ocean grey", "tunnel", "wet asphalt",
+    "storm lightning",
     # grimdark / WH40K-adjacent (real gothic photos, never AI/copyrighted art)
     "gothic cathedral", "dark ruins", "gothic architecture", "dark monastery",
-    "stone castle fog", "storm lightning", "abandoned church",
-    "cathedral interior", "medieval ruins", "dark cloister",
+    "stone castle fog", "abandoned church", "cathedral interior",
+    "medieval ruins", "dark cloister",
 ]
+LIGHT_BG_TAGS = [
+    "empty room", "empty bed", "kitchen night", "empty cafe", "subway",
+    "neon night", "snow", "old building", "desert road", "clouds",
+]
+NEUTRAL_BG_TAGS = ["night city", "grey sky", "clouds", "snow", "old building"]
+BG_TAGS = DARK_BG_TAGS + [t for t in LIGHT_BG_TAGS if t not in DARK_BG_TAGS]
+
+
+def _tags_for_tone(tone: str | None) -> list[str]:
+    """P1 tone→background mapping: dark quotes draw from grim imagery,
+    light quotes from softer everyday imagery; neutral tags pad both."""
+    if tone and tone.lower().startswith("d"):
+        pool = list(dict.fromkeys(DARK_BG_TAGS + NEUTRAL_BG_TAGS))
+    else:
+        pool = list(dict.fromkeys(LIGHT_BG_TAGS + NEUTRAL_BG_TAGS))
+    return pool
 
 LAYOUTS = ["bottom", "bars", "poster", "split", "minimal", "hand"]
 
@@ -432,8 +449,7 @@ async def _fetch_img(client: httpx.AsyncClient, url: str, **kw) -> bytes | None:
     return r.content
 
 
-async def _pexels(client, key):
-    tag = random.choice(BG_TAGS)
+async def _pexels(client, key, tag: str):
     r = await client.get(
         "https://api.pexels.com/v1/search",
         params={"query": tag, "per_page": 15, "page": random.randint(1, 8),
@@ -448,8 +464,7 @@ async def _pexels(client, key):
     return (img, "pexels") if img else None
 
 
-async def _unsplash(client, key):
-    tag = random.choice(BG_TAGS)
+async def _unsplash(client, key, tag: str):
     r = await client.get(
         "https://api.unsplash.com/search/photos",
         params={"query": tag, "per_page": 15, "orientation": "portrait"},
@@ -463,8 +478,7 @@ async def _unsplash(client, key):
     return (img, "unsplash") if img else None
 
 
-async def _pixabay(client, key):
-    tag = random.choice(BG_TAGS)
+async def _pixabay(client, key, tag: str):
     r = await client.get(
         "https://pixabay.com/api/",
         params={"key": key, "q": tag, "image_type": "photo",
@@ -478,8 +492,7 @@ async def _pixabay(client, key):
     return (img, "pixabay") if img else None
 
 
-async def _openverse(client):
-    tag = random.choice(BG_TAGS)
+async def _openverse(client, tag: str):
     r = await client.get(
         "https://api.openverse.org/v1/images/",
         params={"q": tag, "page_size": 15, "license_type": "all"}, timeout=15,
@@ -523,36 +536,52 @@ async def _proxied_client() -> "httpx.AsyncClient | None":
 
 
 async def fetch_background(*, pexels_key=None, unsplash_key=None,
-                           pixabay_key=None) -> tuple:
-    """Multi-source fallback chain → (image_bytes, source_name). Keyed sources
-    (if configured) + Openverse are shuffled for variety; Picsum is always the
-    guaranteed last resort, so generation works with zero API keys.
+                           pixabay_key=None, tone: str | None = None) -> tuple:
+    """Multi-source fallback chain → (image_bytes, source_name, bg_tag).
+    Keyed sources (if configured) + Openverse are shuffled for variety; Picsum
+    is always the guaranteed last resort, so generation works with zero API
+    keys.
+
+    P1: `tone` filters the tag pool (dark → grim imagery, light → softer) so
+    the background matches the quote's mood instead of pure random.
 
     Network resilience: image CDNs (Pexels etc.) are blocked from RF IPs —
     the whole 403/404 wall. The chain first tries direct; on a transport-level
     failure (ConnectTimeout/ConnectError — not just 'no results') it retries
     once through a cached pool SOCKS5 before giving up on that source."""
+    allowed = _tags_for_tone(tone)
+
+    def _run_chain_call(client, src_fn, tag):
+        """Wrap a source call so its result always carries the attempted tag."""
+        async def wrapped():
+            got = await src_fn(tag)
+            if got:
+                return (got[0], got[1], tag)
+            return None
+        return wrapped
 
     async def _run_chain(client):
-        sources = []
+        # A fresh random tone-matched tag per attempt for variety.
+        attempts = []
         if pexels_key:
-            sources.append(lambda: _pexels(client, pexels_key))
+            attempts.append(lambda t: _pexels(client, pexels_key, t))
         if unsplash_key:
-            sources.append(lambda: _unsplash(client, unsplash_key))
+            attempts.append(lambda t: _unsplash(client, unsplash_key, t))
         if pixabay_key:
-            sources.append(lambda: _pixabay(client, pixabay_key))
-        sources.append(lambda: _openverse(client))
-        random.shuffle(sources)
-        for src in sources:
+            attempts.append(lambda t: _pixabay(client, pixabay_key, t))
+        attempts.append(lambda t: _openverse(client, t))
+        random.shuffle(attempts)
+        for src_fn in attempts:
+            tag = random.choice(allowed)
             try:
-                got = await src()
+                got = await _run_chain_call(client, src_fn, tag)()
             except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
                 raise  # transport-level: surface for the proxied retry
             except Exception:
                 got = None
             if got:
                 return got
-        return await _picsum(client)
+        return await _picsum(client) + ("random",)
 
     try:
         async with httpx.AsyncClient(
@@ -661,15 +690,33 @@ async def generate_meme(bank: list[Entry] | None = None,
     style = style or pick_style(layout_avg=layout_avg)
     if not style.effect and random.random() < 0.22:
         style.effect = random.choice(list(EFFECTS))
-    img, img_source = await fetch_background(pexels_key=pexels_key, unsplash_key=unsplash_key,
-                                             pixabay_key=pixabay_key)
+    img, img_source, bg_tag = await fetch_background(
+        pexels_key=pexels_key, unsplash_key=unsplash_key,
+        pixabay_key=pixabay_key, tone=entry.tone,
+    )
     png = render_meme(img, entry, style)
     return {
         "image": png, "entry_id": entry.id, "quote": entry.quote,
         "punchline": entry.punchline, "source": entry.source,
         "layout": style.layout, "tone": entry.tone, "img_source": img_source,
-        "effect": style.effect,
+        "effect": style.effect, "bg_tag": bg_tag,
     }
+
+
+def replace_punchline(entry_id: str, new_punchline: str) -> bool:
+    """P6: swap an entry's punchline in-place (same quote/id/tone/source) —
+    used by the punchline-variation flow. Returns True on success."""
+    new_punchline = (new_punchline or "").strip()
+    if not new_punchline:
+        return False
+    raw = json.loads(BANK_PATH.read_text(encoding="utf-8"))
+    for e in raw:
+        if e.get("id") == entry_id:
+            e["punchline"] = new_punchline
+            BANK_PATH.write_text(json.dumps(raw, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+            return True
+    return False
 
 
 if __name__ == "__main__":

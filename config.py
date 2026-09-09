@@ -24,6 +24,14 @@ TG_SESSION = os.getenv("TG_SESSION", "tg_w40k_user")
 MEME_SOURCE_CHANNELS = [
     c.strip() for c in os.getenv("MEME_SOURCE_CHANNELS", "").split(",") if c.strip()
 ]
+# Meme-trend feed: memepedia.ru main page (RU-hosted, reachable directly from
+# the VM without a proxy) — fresh article titles + all-time top block feed a
+# weekly GLM digest that is injected into /meme_seed as trend inspiration.
+TREND_SOURCE_URLS = [
+    u.strip() for u in os.getenv(
+        "TREND_SOURCE_URLS", "https://memepedia.ru/"
+    ).split(",") if u.strip()
+]
 try:
     MEME_HARVEST_PER_CHANNEL = int(os.getenv("MEME_HARVEST_PER_CHANNEL", "3"))
 except ValueError:

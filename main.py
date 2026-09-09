@@ -30,6 +30,7 @@ from config import (
     MEME_SOURCE_CHANNELS,
     MEME_HARVEST_PER_CHANNEL,
     HEALTH_CHECK_INTERVAL,
+    TREND_SOURCE_URLS,
 )
 from database import (
     init_db,
@@ -65,7 +66,10 @@ import channel_sources
 import json as _json
 import random as _random
 import re as _re
-from prompts import MEME_SEED_SYSTEM, MEME_HARVEST_SYSTEM, MEME_STYLE_FEWSHOT
+from prompts import (
+    MEME_SEED_SYSTEM, MEME_HARVEST_SYSTEM, MEME_STYLE_FEWSHOT,
+    MEME_COHERENCE_SYSTEM, MEME_PUNCHLINE_VARIANTS_SYSTEM, MEME_TRENDS_DIGEST,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -413,6 +417,35 @@ async def cb_rate(callback: CallbackQuery):
 
 # ---- meme generator (crisiswoman): review-then-publish, parallel to summary ----
 
+async def _coherence_check(res: dict) -> int:
+    """P4: ask GLM how well the background matches the quote (1-5).
+    Returns 0 on any failure (treated as 'neutral, keep')."""
+    payload = {
+        "model": MEME_MODEL,
+        "messages": [
+            {"role": "system", "content": MEME_COHERENCE_SYSTEM},
+            {"role": "user", "content": (
+                f"Цитата: {res['quote']}\nПанчлайн: {res['punchline']}\n"
+                f"Тон: {res['tone']}\nТег фона: {res.get('bg_tag', '?')}\n"
+                f"Лэйаут: {res['layout']}\nФон из: {res.get('img_source', '?')}"
+            )},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.2,
+    }
+    try:
+        result = await _call_glm(payload)
+        raw = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        if not m:
+            return 0
+        score = int(_json.loads(m.group(0)).get("score", 0) or 0)
+        return max(0, min(5, score))
+    except Exception:
+        logger.exception("coherence check failed; keeping meme as-is")
+        return 0
+
+
 async def _gen_meme(entry_id: str | None = None):
     bias = await get_meme_bias()
     res = await meme_mod.generate_meme(
@@ -420,6 +453,19 @@ async def _gen_meme(entry_id: str | None = None):
         pexels_key=PEXELS_API_KEY, unsplash_key=UNSPLASH_API_KEY,
         pixabay_key=PIXABAY_API_KEY,
     )
+    # P4: one full re-roll if the background clashes with the quote's tone.
+    score = await _coherence_check(res)
+    if 0 < score < 3:
+        logger.info("coherence %d/5 (%s/%s) — re-rolling", score,
+                    res["tone"], res.get("bg_tag"))
+        try:
+            res = await meme_mod.generate_meme(
+                entry_id=entry_id, bias=bias,
+                pexels_key=PEXELS_API_KEY, unsplash_key=UNSPLASH_API_KEY,
+                pixabay_key=PIXABAY_API_KEY,
+            )
+        except Exception:
+            logger.exception("coherence re-roll failed; keeping first variant")
     meme_mod.cache_meme(res)   # small rotating history on disk (gitignored)
     return res
 
@@ -435,6 +481,7 @@ def _meme_kb(entry_id: str, layout: str):
     b.row(InlineKeyboardButton(text="📤 Опубликовать", callback_data="meme:pub"))
     b.row(InlineKeyboardButton(text="🎨 Другой стиль", callback_data=f"meme:stl:{entry_id}"),
           InlineKeyboardButton(text="🔄 Другая цитата", callback_data="meme:new"))
+    b.row(InlineKeyboardButton(text="🎭 Панчлайны", callback_data=f"meme:pun:{entry_id}"))
     b.row(*[InlineKeyboardButton(text=label, callback_data=f"meme:rate:{entry_id}:{layout}:{n}")
             for n, label in ((5, "⭐5"), (4, "4"), (3, "3"), (2, "2"), (1, "1💩"))])
     b.row(InlineKeyboardButton(text="❌", callback_data="meme:del"))
@@ -493,6 +540,108 @@ async def cb_meme_style(callback: CallbackQuery):
         await _meme_edit(callback, entry_id)
     except Exception as e:
         await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+async def _gen_punchline_variants(quote: str, current: str, tone: str) -> list[str]:
+    """P6: three alternative punchlines for the same quote via GLM."""
+    bank = meme_mod.load_bank()
+    examples = _random.sample(bank, min(4, len(bank)))
+    ex_block = "\n".join(f'- «{e.quote}» → {e.punchline}' for e in examples)
+    payload = {
+        "model": MEME_MODEL,
+        "messages": [
+            {"role": "system", "content": MEME_PUNCHLINE_VARIANTS_SYSTEM},
+            {"role": "user", "content": (
+                f"Примеры стиля канала:\n{ex_block}\n\n"
+                f"Цитата: {quote}\nТекущий панчлайн: {current}\nТон: {tone}\n"
+                f"Ответ — СТРОГО JSON-массив из 3 объектов."
+            )},
+        ],
+        "max_tokens": 800,
+        "temperature": 0.9,
+    }
+    result = await _call_glm(payload)
+    raw = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    pairs = _extract_pairs(raw) if raw.strip().startswith("[") else []
+    if not pairs:
+        m = _re.search(r"\[.*\]", raw, _re.DOTALL)
+        pairs = _json.loads(m.group(1)) if m else []
+    out = []
+    for p in pairs[:3]:
+        v = (p.get("punchline") or "").strip() if isinstance(p, dict) else ""
+        if v:
+            out.append(v)
+    return out
+
+
+@dp.callback_query(F.data.startswith("meme:pun:"))
+async def cb_meme_pun(callback: CallbackQuery):
+    """P6 step 1: generate 3 punchline variants, offer as buttons."""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    entry_id = callback.data.split(":", 2)[2]
+    await callback.answer("Придумываю панчлайны…")
+    bank = meme_mod.load_bank()
+    entry = next((e for e in bank if e.id == entry_id), None)
+    if not entry:
+        await callback.message.answer("⚠️ Цитата не найдена в банке")
+        return
+    try:
+        variants = await _gen_punchline_variants(entry.quote, entry.punchline, entry.tone)
+    except Exception as e:
+        logger.exception("punchline variants failed")
+        await callback.message.answer(f"❌ GLM: {e}")
+        return
+    variants = [v for v in variants if v.strip()][:3]
+    if not variants:
+        await callback.message.answer("⚠️ GLM не вернул вариантов")
+        return
+    await set_setting("meme_pun_variants",
+                      _json.dumps({"entry_id": entry_id, "variants": variants}))
+    b = InlineKeyboardBuilder()
+    for i, v in enumerate(variants, 1):
+        b.row(InlineKeyboardButton(text=f"{i}. {v[:60]}", callback_data=f"meme:punsel:{i}"))
+    b.row(InlineKeyboardButton(text="❌ отмена", callback_data="meme:puncancel"))
+    await callback.message.answer("🎭 Варианты панчлайна (цитата останется той же):",
+                                   reply_markup=b.as_markup())
+
+
+@dp.callback_query(F.data.startswith("meme:punsel:"))
+async def cb_meme_punsel(callback: CallbackQuery):
+    """P6 step 2: swap the punchline in the bank and re-render the same quote."""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    idx = int(callback.data.rsplit(":", 1)[1]) - 1
+    raw = await get_setting("meme_pun_variants")
+    try:
+        stored = _json.loads(raw or "{}")
+        entry_id = stored["entry_id"]
+        variant = stored["variants"][idx]
+    except Exception:
+        await callback.answer("⚠️ Варианты устарели — сгенерируй заново", show_alert=True)
+        return
+    if not meme_mod.replace_punchline(entry_id, variant):
+        await callback.answer("⚠️ Не удалось заменить (цитата исчезла?)", show_alert=True)
+        return
+    await delete_setting("meme_pun_variants")
+    await callback.answer("Панчлайн заменён")
+    try:
+        await callback.message.delete()
+        await _meme_edit(callback, entry_id)
+    except Exception as e:
+        await callback.message.answer(f"Рендер: {e}")
+
+
+@dp.callback_query(F.data == "meme:puncancel")
+async def cb_meme_puncancel(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await delete_setting("meme_pun_variants")
+    await callback.answer("Отменено")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data == "meme:pub")
@@ -589,6 +738,73 @@ def _extract_pairs(raw: str) -> list:
     return []
 
 
+_STOP_TITLES = {
+    "Найти", "Войти", "Реклама", "Мемотека", "Статьи", "Новости", "Омагад",
+    "Предложка", "О проекте", "Контакты", "Далее", "Все новости",
+    "Стань автором", "Медиакит", "Разное", "Зарегистрироваться",
+    "Забыли пароль?", "Запомнить", "сброс", "Вернуться назад", "Eng",
+}
+
+
+def _extract_titles(html: str, limit: int = 25) -> list[str]:
+    """Pull plausible meme-article titles from memepedia HTML: <a ...>TEXT</a>
+    where TEXT looks like a title (Cyrillic, sane length, not nav chrome)."""
+    import html as _html
+    titles: list[str] = []
+    seen: set[str] = set()
+    for m in _re.finditer(r"<a[^>]*>([^<>{}]{8,140})</a>", html):
+        t = _html.unescape(m.group(1)).strip()
+        if (t in seen or t in _STOP_TITLES or t in ("Предложка",)
+                or not _re.search(r"[а-яА-ЯёЁ]", t) or t.lower().startswith("в ")):
+            continue
+        seen.add(t)
+        titles.append(t)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+async def refresh_trends() -> str | None:
+    """Fetch memepedia main pages, extract fresh titles, condense into a
+    short trend list via GLM, cache in settings.meme_trends. RU-hosted site —
+    fetched DIRECTLY (no proxy). Returns the digest or None on failure."""
+    import httpx as _httpx
+    titles: list[str] = []
+    for url in TREND_SOURCE_URLS:
+        try:
+            async with _httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                          headers={"User-Agent": "tg_w40k/1.0"}) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                titles.extend(_extract_titles(r.text))
+        except Exception:
+            logger.exception("trend source fetch failed: %s", url)
+    if not titles:
+        logger.warning("trend refresh: no titles extracted")
+        return None
+    payload = {
+        "model": MEME_MODEL,
+        "messages": [
+            {"role": "system", "content": MEME_TRENDS_DIGEST},
+            {"role": "user", "content": "\n".join(titles[:40])},
+        ],
+        "max_tokens": 700,
+        "temperature": 0.4,
+    }
+    try:
+        result = await _call_glm(payload)
+        raw = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        digest = raw.strip()
+    except Exception:
+        logger.exception("trend digest GLM call failed")
+        return None
+    if not digest:
+        return None
+    await set_setting("meme_trends", digest[:2000])
+    logger.info("meme trends refreshed (%d titles -> %d chars)", len(titles), len(digest))
+    return digest
+
+
 async def refresh_meme_bank(n: int = 8, with_channels: bool = True) -> dict:
     """Generate n new quote+punchline pairs via GLM and append (deduped) to
     bank.json. Quality is policed downstream by the rating→bias feedback loop:
@@ -596,7 +812,8 @@ async def refresh_meme_bank(n: int = 8, with_channels: bool = True) -> dict:
 
     When `with_channels` is True and Telethon is configured, a small random
     sample of captions harvested from source channels is prepended to the
-    user prompt as style orientation (few-shot)."""
+    user prompt as style orientation (few-shot). A cached weekly trend digest
+    (memepedia) is prepended the same way."""
     bank = meme_mod.load_bank()
     examples = _random.sample(bank, min(6, len(bank)))
     ex_block = "\n".join(f'- «{e.quote}» → {e.punchline} [{e.tone}]' for e in examples)
@@ -613,7 +830,17 @@ async def refresh_meme_bank(n: int = 8, with_channels: bool = True) -> dict:
         except Exception:
             logger.exception("few-shot fetch failed; continuing without")
 
+    trends_block = ""
+    try:
+        digest = await get_setting("meme_trends")
+        if digest:
+            trends_block = ("ТРЕНДЫ СЕЙЧАС (рунет, по memepedia — вдохновение для "
+                            "темы/лексики, НЕ копируй дословно):\n" + digest + "\n\n")
+    except Exception:
+        logger.exception("trends read failed; continuing without")
+
     user_content = (
+        f"{trends_block}"
         f"{fewshot_block}"
         f"Примеры стиля:\n{ex_block}\n\n"
         f"Уже есть (не повторяй): {existing}\n\n"
@@ -1259,6 +1486,16 @@ async def main():
         minute=0,
         misfire_grace_time=3600,
     )
+    if TREND_SOURCE_URLS:
+        scheduler.add_job(
+            refresh_trends,
+            "cron",
+            day_of_week="mon",
+            hour=6,
+            minute=30,
+            misfire_grace_time=3600,
+        )
+        logger.info("Trend refresh scheduled weekly (Mon 06:30 MSK)")
     if HEALTH_CHECK_INTERVAL > 0:
         scheduler.add_job(
             health_check_proxy,
