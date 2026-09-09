@@ -10,6 +10,7 @@ import difflib
 import hashlib
 import io
 import json
+import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +18,8 @@ from pathlib import Path
 
 import httpx
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).parent
 BANK_PATH = HERE / "bank.json"
@@ -535,20 +538,36 @@ async def _proxied_client() -> "httpx.AsyncClient | None":
         return None
 
 
+def _gradient_fallback(tone: str | None) -> tuple:
+    """Zero-network last resort: a tone-matched vertical gradient rendered
+    locally with PIL. Guarantees /meme never dies on background fetch."""
+    from PIL import Image, ImageOps
+    dark = bool(tone and tone.lower().startswith("d"))
+    grad = Image.linear_gradient("L").resize((CANVAS_W, CANVAS_H))
+    if dark:
+        img = ImageOps.colorize(grad, black=(12, 14, 20), white=(52, 58, 74))
+    else:
+        img = ImageOps.colorize(grad, black=(214, 200, 184), white=(248, 242, 233))
+    import io as _io
+    buf = _io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=88)
+    return (buf.getvalue(), "gradient", "local:gradient")
+
+
 async def fetch_background(*, pexels_key=None, unsplash_key=None,
                            pixabay_key=None, tone: str | None = None) -> tuple:
     """Multi-source fallback chain → (image_bytes, source_name, bg_tag).
     Keyed sources (if configured) + Openverse are shuffled for variety; Picsum
-    is always the guaranteed last resort, so generation works with zero API
-    keys.
+    is the guaranteed last resort, so generation works with zero API keys.
 
     P1: `tone` filters the tag pool (dark → grim imagery, light → softer) so
     the background matches the quote's mood instead of pure random.
 
-    Network resilience: image CDNs (Pexels etc.) are blocked from RF IPs —
-    the whole 403/404 wall. The chain first tries direct; on a transport-level
-    failure (ConnectTimeout/ConnectError — not just 'no results') it retries
-    once through a cached pool SOCKS5 before giving up on that source."""
+    Network resilience: image CDNs (Pexels etc.) are blocked from RF IPs. The
+    DIRECT pass surfaces transport errors to trigger a proxied retry; inside
+    the PROXIED pass transport errors are swallowed per-source (next source /
+    Picsum). If even that dies, a locally rendered gradient guarantees a
+    background — /meme must never fail on image fetch."""
     allowed = _tags_for_tone(tone)
 
     def _run_chain_call(client, src_fn, tag):
@@ -560,7 +579,7 @@ async def fetch_background(*, pexels_key=None, unsplash_key=None,
             return None
         return wrapped
 
-    async def _run_chain(client):
+    async def _run_chain(client, surface_transport: bool):
         # A fresh random tone-matched tag per attempt for variety.
         attempts = []
         if pexels_key:
@@ -576,27 +595,38 @@ async def fetch_background(*, pexels_key=None, unsplash_key=None,
             try:
                 got = await _run_chain_call(client, src_fn, tag)()
             except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
-                raise  # transport-level: surface for the proxied retry
+                if surface_transport:
+                    raise  # direct pass: escalate to the proxied retry
+                got = None  # proxied pass: swallow, try next source
             except Exception:
                 got = None
             if got:
                 return got
-        return await _picsum(client) + ("random",)
+        try:
+            return await _picsum(client) + ("random",)
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
+            if surface_transport:
+                raise
+            return None
 
     try:
         async with httpx.AsyncClient(
             timeout=25, follow_redirects=True,
             headers={"User-Agent": "tg_w40k/1.0"},
         ) as client:
-            return await _run_chain(client)
+            return await _run_chain(client, surface_transport=True)
     except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
         pass  # fall through to the proxied retry
 
     proxied = await _proxied_client()
-    if proxied is None:
-        raise RuntimeError("image CDNs unreachable and no cached pool proxy")
-    async with proxied as client:
-        return await _run_chain(client)
+    if proxied is not None:
+        async with proxied as client:
+            got = await _run_chain(client, surface_transport=False)
+            if got:
+                return got
+    # Everything networked failed — local gradient beats a dead /meme.
+    logger.warning("all image sources failed; using local gradient background")
+    return _gradient_fallback(tone)
 
 
 # ----------------------------------------------------------------- bank

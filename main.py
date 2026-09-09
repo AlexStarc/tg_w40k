@@ -488,6 +488,37 @@ def _meme_kb(entry_id: str, layout: str):
     return b.as_markup()
 
 
+async def _rotate_bot_session() -> None:
+    """Rotate the live bot session to a fresh proxy (same path as
+    health_check_proxy) when the current one flaps mid-request."""
+    try:
+        await bot.session.close()
+    except Exception:
+        pass
+    new_proxy = await _find_any_working_proxy()
+    bot.session = AiohttpSession(proxy=new_proxy) if new_proxy else AiohttpSession()
+    logger.info("session rotated (new proxy: %s)", new_proxy or "direct")
+
+
+async def _deliver_meme(res: dict):
+    """Send the rendered meme to the admin with one network retry: a flapping
+    proxy must not destroy an already-rendered meme."""
+    from aiogram.exceptions import TelegramNetworkError
+    kb = _meme_kb(res["entry_id"], res["layout"])
+    photo = BufferedInputFile(res["image"], filename="meme.jpg")
+    caption = _meme_caption(res)
+    for attempt in range(2):
+        try:
+            await bot.send_photo(ADMIN_ID, photo=photo, caption=caption,
+                                 reply_markup=kb)
+            return
+        except TelegramNetworkError as e:
+            if attempt:
+                raise
+            logger.warning("meme delivery failed (%s); rotating session and retrying", e)
+            await _rotate_bot_session()
+
+
 @dp.message(Command("meme"))
 async def cmd_meme(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -498,25 +529,36 @@ async def cmd_meme(message: Message):
     status = await message.answer("🎨 Генерирую мём…")
     try:
         res = await _gen_meme()
-        await status.delete()
-        await bot.send_photo(
-            ADMIN_ID,
-            BufferedInputFile(res["image"], filename="meme.jpg"),
-            caption=_meme_caption(res),
-            reply_markup=_meme_kb(res["entry_id"], res["layout"]),
-        )
+        try:
+            await status.delete()
+        except Exception:
+            logger.warning("status message delete failed; continuing with delivery")
+        await _deliver_meme(res)
     except Exception as e:
         logger.exception("meme generation failed")
-        await message.answer(f"❌ Ошибка генерации мема: {e}")
+        try:
+            await message.answer(f"❌ Ошибка генерации мема: {e}")
+        except Exception:
+            pass
 
 
 async def _meme_edit(callback: CallbackQuery, entry_id: str | None):
+    from aiogram.exceptions import TelegramNetworkError
     res = await _gen_meme(entry_id=entry_id)
     media = InputMediaPhoto(
         media=BufferedInputFile(res["image"], filename="meme.jpg"),
         caption=_meme_caption(res),
     )
-    await callback.message.edit_media(media, reply_markup=_meme_kb(res["entry_id"], res["layout"]))
+    kb = _meme_kb(res["entry_id"], res["layout"])
+    for attempt in range(2):
+        try:
+            await callback.message.edit_media(media, reply_markup=kb)
+            return
+        except TelegramNetworkError as e:
+            if attempt:
+                raise
+            logger.warning("meme edit failed (%s); rotating session and retrying", e)
+            await _rotate_bot_session()
 
 
 @dp.callback_query(F.data == "meme:new")
