@@ -131,6 +131,18 @@ async def cmd_summary(message: Message):
 
 
 @dp.message(Command("send_to_chat"))
+def _format_chronicle_for_chat(day: str, text: str) -> str:
+    """Compose the channel message: if the summary's first line is its own
+    fragment header (e.g. «Хроника Ереси, Фрагмент 289. Лог Сектора...»),
+    promote it into the message title instead of printing it twice in a row."""
+    lines = (text or "").strip().split("\n", 1)
+    first = lines[0].strip()
+    rest = lines[1].strip() if len(lines) > 1 else ""
+    if rest and ("Фрагмент" in first or "фрагмент" in first):
+        return f"📜 {first}\n📅 Летопись {day}\n\n{rest}"
+    return f"📜 Летопись {day}:\n\n{text.strip()}"
+
+
 async def cmd_send_to_chat(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -141,7 +153,7 @@ async def cmd_send_to_chat(message: Message):
         return
 
     day, text = summaries[0]
-    full_text = f"📜 Летопись {day}:\n\n{text}"
+    full_text = _format_chronicle_for_chat(day, text)
 
     for i in range(0, len(full_text), CHUNK_SIZE):
         await bot.send_message(TARGET_CHAT_ID, full_text[i : i + CHUNK_SIZE])
@@ -383,7 +395,7 @@ async def cb_send(callback: CallbackQuery):
     if not text:
         await callback.answer("Летопись не найдена")
         return
-    full_text = f"📜 Летопись {day}:\n\n{text}"
+    full_text = _format_chronicle_for_chat(day, text)
     for i in range(0, len(full_text), CHUNK_SIZE):
         await bot.send_message(TARGET_CHAT_ID, full_text[i : i + CHUNK_SIZE])
     await callback.answer("Отправлено в чат")
@@ -1265,6 +1277,11 @@ async def daily_summarize(target_date: str = None) -> bool:
 
     characters = await get_all_characters()
     prev_summaries = await get_last_summaries(TARGET_CHAT_ID, limit=5)
+    # Exclude the day being written from context: a /regenerate for date X
+    # used to see X's own old summary as "previous chronicle" and GLM wrote
+    # meta-fiction about "second imprints" instead of the day's events (and
+    # the fragment counter drifted +1).
+    prev_summaries = [s for s in prev_summaries if s[0] != yesterday]
 
     existing_names = {name for name, _ in characters}
     unknown_names = {name for name, title in characters if title == "Неизвестный"}
