@@ -130,7 +130,7 @@ CHUNK_SIZE = 4096
 MAX_SUMMARY_CHARS = 4000
 
 GLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
-PRIMARY_MODEL = "glm-5.1"
+PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "glm-5.3")
 FALLBACK_MODEL = "glm-5-turbo"
 MEME_MODEL = os.getenv("MEME_MODEL", "glm-5.2")
 VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-plus")
