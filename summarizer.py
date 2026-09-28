@@ -92,8 +92,18 @@ async def _call_glm(payload: dict) -> dict:
                     response.status_code, payload.get("model"), body[:1000]
                 )
             response.raise_for_status()
-            logger.info("GLM response OK, model=%s", payload.get("model"))
-            return response.json()
+            data = response.json()
+            msg = data.get("choices", [{}])[0].get("message", {})
+            content = msg.get("content") or ""
+            # glm-5.x reasoning models sometimes spend everything on
+            # reasoning_content and leave content empty — log enough to see it.
+            logger.info(
+                "GLM response OK, model=%s, content_len=%d, finish=%s, reasoning_len=%d",
+                payload.get("model"), len(content),
+                data.get("choices", [{}])[0].get("finish_reason"),
+                len(msg.get("reasoning_content") or ""),
+            )
+            return data
         except httpx.TimeoutException:
             logger.warning(
                 "GLM timeout on model=%s, falling back to %s",
@@ -471,7 +481,13 @@ async def _run_editor(
     }
     try:
         result = await _call_glm(payload)
-        return result["choices"][0]["message"]["content"]
+        edited = result["choices"][0]["message"]["content"]
+        if not edited or not edited.strip():
+            # z.ai reasoning models occasionally return HTTP 200 with an empty
+            # content field — that must NOT wipe a good writer draft.
+            logger.warning("GLM editor returned empty content; keeping original")
+            return summary
+        return edited
     except Exception as e:
         logger.error("GLM editor failed: %s", e)
         return summary
@@ -699,6 +715,12 @@ async def summarize(
         summary, character_registry_str, ratings_feedback=ratings_feedback
     )
     summary = _fix_fragment_number(summary, next_fragment)
+    if not summary or not summary.strip():
+        # Surface as a generation failure so main.py sends the admin an error
+        # card with a retry button, instead of silently saving an empty row.
+        raise RuntimeError(
+            "GLM produced empty chronicle content (writer and editor both empty)"
+        )
     return summary, new_char_titles
 
 
