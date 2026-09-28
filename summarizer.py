@@ -79,6 +79,11 @@ _headers = {"Authorization": f"Bearer {GLM_API_KEY}", "Content-Type": "applicati
     reraise=True,
 )
 async def _call_glm(payload: dict) -> dict:
+    # glm-5.x defaults to extended thinking; since ~2026-09-27 z.ai burns the
+    # whole token budget on reasoning (observed reasoning_len=12785,
+    # finish=length, content empty) and the chronicle comes back empty.
+    # Chronicle tasks are single-pass creative writing — thinking stays off.
+    payload.setdefault("thinking", {"type": "disabled"})
     async with httpx.AsyncClient(timeout=MODEL_RESPONSE_TIMEOUT) as client:
         try:
             response = await client.post(GLM_URL, headers=_headers, json=payload)
