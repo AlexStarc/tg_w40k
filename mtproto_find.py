@@ -14,6 +14,7 @@ Run:
     python mtproto_find.py --limit 40      # check first 40 entries
     python mtproto_find.py --count 10      # print up to 10 alive
     python mtproto_find.py --src URL       # custom list of t.me/proxy links
+    python mtproto_find.py --format telegram | pbcopy  # copy links on macOS
 """
 from __future__ import annotations
 
@@ -21,13 +22,37 @@ import argparse
 import asyncio
 import re
 import sys
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
 DEFAULT_SRC = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
+# GitHub raw is intermittently throttled/broken from RF networks; jsdelivr's
+# GitHub CDN mirror is the usual workaround and serves the same file.
+FALLBACK_SRCS = [
+    "https://cdn.jsdelivr.net/gh/SoliSpirit/mtproto@master/all_proxies.txt",
+]
 SOCKS_HEALTH_SRC = "https://raw.githubusercontent.com/xyzs996/free-proxy-health-list/main/socks5.txt"
+SOCKS_HEALTH_FALLBACK = "https://cdn.jsdelivr.net/gh/xyzs996/free-proxy-health-list@main/socks5.txt"
 LINK_RE = re.compile(r"https?://t\.me/proxy\?[^\"'\s<>]+")
+
+
+async def _fetch_text(urls: list[str], attempts: int = 2) -> str:
+    """Download the first URL that works; raise the last error otherwise."""
+    last_exc: Exception | None = None
+    for url in urls:
+        for _ in range(attempts):
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                    r = await c.get(url)
+                    r.raise_for_status()
+                    if r.text.strip():
+                        return r.text
+            except Exception as e:
+                last_exc = e
+                print(f"fetch failed: {type(e).__name__}: {e} ({url})", file=sys.stderr)
+                await asyncio.sleep(1)
+    raise last_exc or RuntimeError("no sources configured")
 
 
 async def _alive_socks(count: int = 3, timeout: float = 4.0) -> list[str]:
@@ -40,7 +65,13 @@ async def _alive_socks(count: int = 3, timeout: float = 4.0) -> list[str]:
             r.raise_for_status()
             cands = [line.strip() for line in r.text.splitlines() if line.strip()][:60]
     except Exception:
-        return []
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(SOCKS_HEALTH_FALLBACK)
+                r.raise_for_status()
+                cands = [line.strip() for line in r.text.splitlines() if line.strip()][:60]
+        except Exception:
+            return []
     out: list[str] = []
     for entry in cands:
         host, _, port = entry.partition(":")
@@ -118,17 +149,17 @@ async def main() -> int:
     ap.add_argument("--limit", type=int, default=60, help="check first N entries")
     ap.add_argument("--count", type=int, default=5, help="print up to N alive links")
     ap.add_argument("--timeout", type=float, default=5.0, help="per-proxy TCP timeout")
+    ap.add_argument("--format", choices=("default", "telegram"), default="default",
+                    help="telegram: only copy-pasteable HTTPS links on stdout; statistics on stderr")
     ap.add_argument("--via-socks", action="store_true",
                     help="tunnel checks through a reachable SOCKS5 (for networks "
                          "that block Telegram-adjacent hosts directly, e.g. RF)")
     args = ap.parse_args()
 
     try:
-        r = await httpx.AsyncClient(timeout=20, follow_redirects=True).get(args.src)
-        r.raise_for_status()
-        raw = r.text
+        raw = await _fetch_text([args.src] + FALLBACK_SRCS)
     except Exception as e:
-        print(f"Failed to download list: {e}", file=sys.stderr)
+        print(f"Failed to download list: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
     entries = parse_links(raw)
@@ -157,9 +188,15 @@ async def main() -> int:
         if len(alive) >= args.count:
             break
 
-    print(f"Alive: {len(alive)} of {len(entries)} checked")
+    print(f"TCP-reachable: {len(alive)} candidates; MTProto handshake not checked",
+          file=sys.stderr if args.format == "telegram" else sys.stdout)
     for host, port, secret, link in alive[:args.count]:
-        print(link)
+        if args.format == "telegram":
+            print("https://t.me/proxy?" + urlencode({
+                "server": host, "port": port, "secret": secret,
+            }))
+        else:
+            print(link)
     return 0 if alive else 2
 
 
