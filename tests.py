@@ -247,3 +247,75 @@ class TestDatabase:
 
         await delete_setting("test_key")
         assert await get_setting("test_key") is None
+
+
+class TestBotNoiseFilter:
+    """The observed chat has bots that post and self-delete; their text must
+    never reach the chronicle source material."""
+
+    def _message(self, *, is_bot=False, sender_chat=None, reply=None, text="привет"):
+        from aiogram.types import Chat, User
+
+        msg = MagicMock()
+        msg.chat = MagicMock(spec=Chat)
+        msg.chat.id = -100123
+        msg.chat.type = "supergroup"
+        msg.text = text
+        msg.message_id = 42
+        msg.sender_chat = sender_chat
+        msg.from_user = MagicMock(spec=User)
+        msg.from_user.is_bot = is_bot
+        msg.from_user.full_name = "Human"
+        msg.from_user.username = "human"
+        if reply is not None:
+            msg.reply_to_message = reply
+        else:
+            msg.reply_to_message = None
+        return msg
+
+    async def _collect(self, message):
+        from main import collect_message
+
+        saved = {}
+
+        async def _capture(chat_id, username, text, **kwargs):
+            saved.update(kwargs)
+            saved["text"] = text
+
+        with patch("main.TARGET_CHAT_ID", -100123), \
+                patch("main.save_message", new=AsyncMock(side_effect=_capture)):
+            await collect_message(message)
+        return saved
+
+    @pytest.mark.asyncio
+    async def test_bot_author_message_not_stored(self):
+        assert await self._collect(self._message(is_bot=True)) == {}
+
+    @pytest.mark.asyncio
+    async def test_sender_chat_message_not_stored(self):
+        assert await self._collect(self._message(sender_chat=MagicMock())) == {}
+
+    @pytest.mark.asyncio
+    async def test_reply_to_bot_drops_bot_text(self):
+        from aiogram.types import Message, User
+
+        replied = MagicMock(spec=Message)
+        replied.text = "БОТСКИЙ СПАМ, который скоро удалят"
+        replied.from_user = MagicMock(spec=User)
+        replied.from_user.is_bot = True
+
+        saved = await self._collect(self._message(reply=replied))
+        assert saved["text"] == "привет"
+        assert saved["reply_to_text"] is None
+
+    @pytest.mark.asyncio
+    async def test_reply_to_human_keeps_context(self):
+        from aiogram.types import Message, User
+
+        replied = MagicMock(spec=Message)
+        replied.text = "человеческий ответ"
+        replied.from_user = MagicMock(spec=User)
+        replied.from_user.is_bot = False
+
+        saved = await self._collect(self._message(reply=replied))
+        assert saved["reply_to_text"] == "человеческий ответ"

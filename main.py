@@ -1232,6 +1232,16 @@ async def collect_message(message: Message):
     if message.from_user.is_bot:
         return
 
+    # Messages posted "on behalf of a chat" (bots commonly post this way)
+    # carry a sender_chat instead of a real user - not chat conversation.
+    if message.sender_chat is not None:
+        logger.info(
+            "Skip sender_chat message (chat=%s): %s",
+            message.sender_chat.id,
+            message.text[:60],
+        )
+        return
+
     text_lower = message.text.lower()
     if any(bad in text_lower for bad in BAD_SUBSTRINGS):
         logger.info("Skip spam message: %s", message.text)
@@ -1239,9 +1249,16 @@ async def collect_message(message: Message):
 
     username = message.from_user.full_name or message.from_user.username
 
+    # Never carry bot-authored text into the chronicle source: the chat has
+    # bots that post and self-delete, and humans reply to them, which used to
+    # splice the bot's spam into the summary as reply context.
     reply_to_text = None
-    if message.reply_to_message and message.reply_to_message.text:
-        reply_to_text = message.reply_to_message.text
+    replied = message.reply_to_message
+    if replied is not None and replied.text:
+        if replied.from_user is not None and replied.from_user.is_bot:
+            logger.info("Drop bot reply context from %s", username)
+        else:
+            reply_to_text = replied.text
 
     await save_message(
         message.chat.id,
