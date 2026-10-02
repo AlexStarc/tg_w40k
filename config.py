@@ -152,6 +152,12 @@ MAX_TOKENS = 15000
 MODEL_RESPONSE_TIMEOUT = 120
 
 TWO_PASS_ENABLED = True
+# The observed chat has bots that post and self-delete; replies to them are
+# orphaned reactions with no context. Drop them outright (default) or keep the
+# human message without the quoted bot text.
+DROP_REPLIES_TO_BOTS = os.getenv("DROP_REPLIES_TO_BOTS", "1").lower() not in (
+    "0", "false", "no",
+)
 TOKEN_LIMIT_INPUT = 8000
 CHARS_PER_TOKEN = 4
 MESSAGES_PER_CHUNK = 60

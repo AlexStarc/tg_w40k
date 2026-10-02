@@ -31,6 +31,7 @@ from config import (
     MEME_HARVEST_PER_CHANNEL,
     HEALTH_CHECK_INTERVAL,
     TREND_SOURCE_URLS,
+    DROP_REPLIES_TO_BOTS,
 )
 from database import (
     init_db,
@@ -1251,11 +1252,15 @@ async def collect_message(message: Message):
 
     # Never carry bot-authored text into the chronicle source: the chat has
     # bots that post and self-delete, and humans reply to them, which used to
-    # splice the bot's spam into the summary as reply context.
+    # splice the bot's spam into the summary as reply context. A reply to a bot
+    # is an orphaned reaction, so it is dropped as a whole by default.
     reply_to_text = None
     replied = message.reply_to_message
     if replied is not None and replied.text:
         if replied.from_user is not None and replied.from_user.is_bot:
+            if DROP_REPLIES_TO_BOTS:
+                logger.info("Skip reply to bot from %s", username)
+                return
             logger.info("Drop bot reply context from %s", username)
         else:
             reply_to_text = replied.text

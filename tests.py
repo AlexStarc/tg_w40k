@@ -296,7 +296,7 @@ class TestBotNoiseFilter:
         assert await self._collect(self._message(sender_chat=MagicMock())) == {}
 
     @pytest.mark.asyncio
-    async def test_reply_to_bot_drops_bot_text(self):
+    async def test_reply_to_bot_is_not_stored(self):
         from aiogram.types import Message, User
 
         replied = MagicMock(spec=Message)
@@ -304,7 +304,19 @@ class TestBotNoiseFilter:
         replied.from_user = MagicMock(spec=User)
         replied.from_user.is_bot = True
 
-        saved = await self._collect(self._message(reply=replied))
+        assert await self._collect(self._message(reply=replied)) == {}
+
+    @pytest.mark.asyncio
+    async def test_reply_to_bot_kept_without_context_when_flag_off(self):
+        from aiogram.types import Message, User
+
+        replied = MagicMock(spec=Message)
+        replied.text = "БОТСКИЙ СПАМ"
+        replied.from_user = MagicMock(spec=User)
+        replied.from_user.is_bot = True
+
+        with patch("main.DROP_REPLIES_TO_BOTS", False):
+            saved = await self._collect(self._message(reply=replied))
         assert saved["text"] == "привет"
         assert saved["reply_to_text"] is None
 
