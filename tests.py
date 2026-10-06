@@ -331,3 +331,31 @@ class TestBotNoiseFilter:
 
         saved = await self._collect(self._message(reply=replied))
         assert saved["reply_to_text"] == "человеческий ответ"
+
+
+class TestMemeEditFallback:
+    @pytest.mark.asyncio
+    async def test_edit_gone_delivers_fresh_photo(self):
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.types import Message
+        import main as m
+
+        res = {"image": b"img", "entry_id": "e1", "layout": "classic",
+               "quote": "q", "punchline": "p", "tone": "sardonic",
+               "bg_tag": "gothic", "img_source": "gradient"}
+
+        cb = MagicMock()
+        cb.message = MagicMock(spec=Message)
+        cb.message.edit_media = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(), message="Bad Request: message to edit not found"))
+        cb.message.answer_photo = AsyncMock()
+
+        with patch.object(m, "_gen_meme", new=AsyncMock(return_value=res)), \
+                patch.object(m, "_meme_caption", return_value="cap"), \
+                patch.object(m, "_meme_kb", return_value=None), \
+                patch.object(m, "_rotate_bot_session", new=AsyncMock()):
+            await m._meme_edit(cb, "e1")
+
+        cb.message.edit_media.assert_awaited_once()
+        cb.message.answer_photo.assert_awaited_once()

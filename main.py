@@ -556,22 +556,39 @@ async def cmd_meme(message: Message):
 
 
 async def _meme_edit(callback: CallbackQuery, entry_id: str | None):
-    from aiogram.exceptions import TelegramNetworkError
+    """Re-render and update the meme photo the callback came from. If that
+    message is gone (deleted by the admin, cleared, or a text picker) the
+    render is delivered as a fresh photo message instead."""
+    from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
     res = await _gen_meme(entry_id=entry_id)
-    media = InputMediaPhoto(
-        media=BufferedInputFile(res["image"], filename="meme.jpg"),
-        caption=_meme_caption(res),
-    )
     kb = _meme_kb(res["entry_id"], res["layout"])
     for attempt in range(2):
         try:
-            await callback.message.edit_media(media, reply_markup=kb)
+            await callback.message.edit_media(
+                InputMediaPhoto(
+                    media=BufferedInputFile(res["image"], filename="meme.jpg"),
+                    caption=_meme_caption(res),
+                ),
+                reply_markup=kb,
+            )
             return
         except TelegramNetworkError as e:
             if attempt:
-                raise
+                break
             logger.warning("meme edit failed (%s); rotating session and retrying", e)
             await _rotate_bot_session()
+        except TelegramBadRequest as e:
+            if not any(t in str(e) for t in (
+                "to edit not found", "can't be edited", "no text in the message",
+            )):
+                raise
+            logger.warning("meme edit impossible (%s); sending fresh message", e)
+            break
+    await callback.message.answer_photo(
+        BufferedInputFile(res["image"], filename="meme.jpg"),
+        caption=_meme_caption(res),
+        reply_markup=kb,
+    )
 
 
 @dp.callback_query(F.data == "meme:new")
@@ -681,8 +698,11 @@ async def cb_meme_punsel(callback: CallbackQuery):
     await delete_setting("meme_pun_variants")
     await callback.answer("Панчлайн заменён")
     try:
-        await callback.message.delete()
+        # callback.message here is the text variants-picker, not the meme
+        # photo: _meme_edit delivers the re-render as a fresh photo message
+        # and the picker is removed only after the render succeeded.
         await _meme_edit(callback, entry_id)
+        await callback.message.delete()
     except Exception as e:
         await callback.message.answer(f"Рендер: {e}")
 
