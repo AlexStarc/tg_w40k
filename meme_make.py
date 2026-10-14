@@ -4,9 +4,9 @@ Same recipes as main.py/meme.py: P1 tone-matched background (gradient
 fallback — image CDNs are unreachable from here), bias-free style pick,
 random effect at the bot's 22% rate, P6 punchline override for re-rolls.
 
-With --glm the LLM steps run against z.ai too: P4 coherence check
-(one re-roll... well, a warning — the background is always the local
-gradient) and P6 punchline variants, using the exact prompts.py recipes.
+With --glm the LLM steps run against z.ai too: P4 coherence check with a
+full re-roll on dissonance (one re-roll, as in _gen_meme) and P6 punchline
+variants (single renders only), using the exact prompts.py recipes.
 Backgrounds stay zero-network on purpose.
 """
 from __future__ import annotations
@@ -83,12 +83,13 @@ def _variants(entry: meme.Entry, model: str) -> list[str]:
             if isinstance(v, dict) and v.get("punchline", "").strip()][:3]
 
 
-def _coherence(res: dict, model: str) -> tuple[int, str]:
+def _coherence(entry: meme.Entry, style: meme.Style, bg_tag: str,
+               img_source: str, model: str) -> tuple[int, str]:
     raw = _glm(
         model, prompts.MEME_COHERENCE_SYSTEM,
-        f"Цитата: {res['quote']}\nПанчлайн: {res['punchline']}\n"
-        f"Тон: {res['tone']}\nТег фона: {res.get('bg_tag', '?')}\n"
-        f"Лэйаут: {res['layout']}\nФон из: {res.get('img_source', '?')}",
+        f"Цитата: {entry.quote}\nПанчлайн: {entry.punchline}\n"
+        f"Тон: {entry.tone}\nТег фона: {bg_tag}\n"
+        f"Лэйаут: {style.layout}\nФон из: {img_source}",
         max_tokens=200, temperature=0.2,
     )
     m = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -96,6 +97,35 @@ def _coherence(res: dict, model: str) -> tuple[int, str]:
         return 0, "unparseable"
     d = json.loads(m.group(0))
     return int(d.get("score", 0) or 0), str(d.get("reason", ""))[:80]
+
+
+def _roll(bank, args) -> tuple[meme.Entry, meme.Style, bytes, str, str]:
+    style = meme.pick_style(force_layout=args.layout)
+    if args.effect:
+        style.effect = args.effect
+    elif not style.effect and random.random() < 0.22:
+        style.effect = random.choice(list(meme.EFFECTS))
+    entry = next((e for e in bank if e.id == args.id), None) if args.id \
+        else random.choice(bank)
+    if entry is None:
+        sys.exit(f"no entry {args.id!r} in bank")
+    if args.punchline:
+        entry.punchline = args.punchline.strip()
+    img, img_source, bg_tag = meme._gradient_fallback(entry.tone)
+    data = meme.render_meme(img, entry, style)
+    return entry, style, data, img_source, bg_tag
+
+
+def _save(out: Path, entry: meme.Entry, style: meme.Style, data: bytes) -> Path:
+    out.mkdir(parents=True, exist_ok=True)
+    eff = f"-{style.effect}" if style.effect else ""
+    path = out / f"{entry.id}-{style.layout}{eff}.jpg"
+    k = 2
+    while path.exists():
+        path = out / f"{entry.id}-{style.layout}{eff}-{k}.jpg"
+        k += 1
+    path.write_bytes(data)
+    return path
 
 
 def _list(bank):
@@ -112,8 +142,11 @@ def main() -> None:
     ap.add_argument("--effect", choices=sorted(meme.EFFECTS), help="force effect")
     ap.add_argument("--punchline", help="override punchline (render-only, P6)")
     ap.add_argument("--seed", type=int, help="random seed for reproducible style")
+    ap.add_argument("--n", type=int, default=1,
+                    help="generate N memes (random entry/style each)")
     ap.add_argument("--glm", action="store_true",
-                    help="P4 coherence check + P6 punchline variants via z.ai")
+                    help="P4 coherence check (re-roll on dissonance) via z.ai; "
+                         "with --n 1 also P6 punchline variants")
     ap.add_argument("--no-variants", action="store_true",
                     help="with --glm: skip the P6 variants call")
     ap.add_argument("--out", default=str(OUT_DIR), help="output directory")
@@ -127,41 +160,29 @@ def main() -> None:
     model = os.getenv("MEME_MODEL", "glm-5.2")
     if args.seed is not None:
         random.seed(args.seed)
-    entry = next((e for e in bank if e.id == args.id), None) if args.id \
-        else random.choice(bank)
-    if entry is None:
-        sys.exit(f"no entry {args.id!r} in bank")
-    if args.punchline:
-        entry.punchline = args.punchline.strip()
+    if args.id and args.n > 1:
+        sys.exit("--id with --n > 1 makes no sense (same entry every roll)")
+    if args.punchline and args.n > 1:
+        sys.exit("--punchline with --n > 1 makes no sense (same text every roll)")
 
-    style = meme.pick_style(force_layout=args.layout)
-    if args.effect:
-        style.effect = args.effect
-    elif not style.effect and random.random() < 0.22:
-        style.effect = random.choice(list(meme.EFFECTS))
-
-    img, img_source, bg_tag = meme._gradient_fallback(entry.tone)
-    data = meme.render_meme(img, entry, style)
-
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    eff = f"-{style.effect}" if style.effect else ""
-    path = out / f"{entry.id}-{style.layout}{eff}.jpg"
-    path.write_bytes(data)
-    print(f"стиль: {style.layout}{eff} · фон: {img_source} · [{entry.tone}] · {path}")
-
-    if args.glm:
-        score, reason = _coherence({
-            "quote": entry.quote, "punchline": entry.punchline,
-            "tone": entry.tone, "bg_tag": bg_tag, "layout": style.layout,
-            "img_source": img_source,
-        }, model)
-        print(f"P4 связность: {score}/5 — {reason}")
-        if 0 < score < 3:
-            print("⚠️ диссонанс: на сервере был бы ре-ролл; попробуй --layout")
-        if not args.no_variants:
-            for i, v in enumerate(_variants(entry, model), 1):
-                print(f"  {i}. {v}")
+    for i in range(args.n):
+        if i:
+            print()
+        entry, style, data, img_source, bg_tag = _roll(bank, args)
+        if args.glm:
+            score, reason = _coherence(entry, style, bg_tag, img_source, model)
+            print(f"P4 связность: {score}/5 — {reason}")
+            if 0 < score < 3:  # P4: one full re-roll, as in main._gen_meme
+                print("↻ диссонанс — ре-ролл цитаты и стиля")
+                entry, style, data, img_source, bg_tag = _roll(bank, args)
+        path = _save(Path(args.out), entry, style, data)
+        eff = f" · 🎞{style.effect}" if style.effect else ""
+        print(f"стиль: {style.layout}{eff} · фон: {img_source} · "
+              f"[{entry.tone}] · {path}")
+        print(f"  «{entry.quote[:70]}» → {entry.punchline[:60]}")
+        if args.glm and args.n == 1 and not args.no_variants:
+            for j, v in enumerate(_variants(entry, model), 1):
+                print(f"  P6-{j}. {v}")
 
 
 if __name__ == "__main__":
