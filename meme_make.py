@@ -27,6 +27,33 @@ import prompts
 
 OUT_DIR = Path(__file__).parent / "memes_out"
 GLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
+# From RF networks Pexels/Unsplash/Pixabay/Openverse are DPI-blocked; picsum
+# is reachable, so the photo-background option rides on it (same last-resort
+# source the bot uses). render_meme cover-crops and tone-fits either way.
+PICSUM_URL = "https://picsum.photos/seed/{seed}/{w}/{h}"
+
+
+def _bg_picsum() -> tuple:
+    seed = random.randint(0, 99999)
+    r = httpx.get(PICSUM_URL.format(seed=seed, w=meme.CANVAS_W,
+                                    h=meme.CANVAS_H),
+                  timeout=25, follow_redirects=True)
+    r.raise_for_status()
+    return (r.content, "picsum", "random")
+
+
+def _bg(spec: str, tone: str | None) -> tuple:
+    """--bg resolution: gradient (default) | picsum | file:PATH."""
+    if spec.startswith("file:"):
+        p = Path(spec[5:]).expanduser()
+        return (p.read_bytes(), f"file:{p.name}", "user")
+    if spec == "picsum":
+        try:
+            return _bg_picsum()
+        except Exception as e:
+            print(f"picsum failed ({type(e).__name__}: {e}); gradient fallback",
+                  file=sys.stderr)
+    return meme._gradient_fallback(tone)
 
 
 def _glm(model: str, system: str, user: str, *, max_tokens: int,
@@ -111,7 +138,7 @@ def _roll(bank, args) -> tuple[meme.Entry, meme.Style, bytes, str, str]:
         sys.exit(f"no entry {args.id!r} in bank")
     if args.punchline:
         entry.punchline = args.punchline.strip()
-    img, img_source, bg_tag = meme._gradient_fallback(entry.tone)
+    img, img_source, bg_tag = _bg(args.bg, entry.tone)
     data = meme.render_meme(img, entry, style)
     return entry, style, data, img_source, bg_tag
 
@@ -142,6 +169,9 @@ def main() -> None:
     ap.add_argument("--effect", choices=sorted(meme.EFFECTS), help="force effect")
     ap.add_argument("--punchline", help="override punchline (render-only, P6)")
     ap.add_argument("--seed", type=int, help="random seed for reproducible style")
+    ap.add_argument("--bg", default="gradient",
+                    help="background: gradient (default), picsum (random "
+                         "photo) or file:PATH (your own image)")
     ap.add_argument("--n", type=int, default=1,
                     help="generate N memes (random entry/style each)")
     ap.add_argument("--glm", action="store_true",
